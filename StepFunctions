@@ -1,0 +1,248 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template to deploy 3 Lambda functions with AWS Step Functions, scheduled EventBridge trigger, and customizable CloudWatch Logs for Step Functions.
+
+Parameters:
+  ScheduleExpressionParam:
+    Type: String
+    Description: 'The schedule expression (e.g., rate(1 day), cron(0 12 * * ? *))'
+    Default: 'rate(1 day)'
+
+  LogGroupNameParam:
+    Type: String
+    Description: 'The name of the CloudWatch Log Group for Step Functions'
+    Default: '/aws/vendedlogs/step-functions'
+
+  RetentionInDaysParam:
+    Type: Number
+    Description: 'The number of days to retain logs in CloudWatch Log Group'
+    Default: 14
+
+Resources:
+  # CloudWatch Log Group for Step Functions logs
+  StepFunctionsLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Ref LogGroupNameParam  # 使用参数化的 Log Group 名称
+      RetentionInDays: !Ref RetentionInDaysParam  # 使用参数化的日志保留天数
+
+  # Lambda 执行角色
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal: 
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies: 
+        - PolicyName: 'LambdaBasicExecutionPolicy'
+          PolicyDocument: 
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+
+  # Step Functions 执行角色，添加 CloudWatch Logs 权限
+  StepFunctionExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'states.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'StepFunctionsLambdaInvokePolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource:
+                  - !GetAtt LambdaFunction1.Arn
+                  - !GetAtt LambdaFunction2.Arn
+                  - !GetAtt LambdaFunction3.Arn
+        - PolicyName: 'StepFunctionsCloudWatchLogsPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: 
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${LogGroupNameParam}:*'
+
+  # 定义 Lambda 函数 1
+  LambdaFunction1:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: 'LambdaTask1'
+      Handler: 'index.handler'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              # Task 1 logic
+              print("Executing Task 1")
+              return {"status": "Task 1 Completed"}
+      Runtime: 'python3.10'
+      Timeout: 60
+      MemorySize: 128
+
+  # 定义 Lambda 函数 2
+  LambdaFunction2:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: 'LambdaTask2'
+      Handler: 'index.handler'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              # Task 2 logic
+              print("Executing Task 2")
+              return {"status": "Task 2 Completed"}
+      Runtime: 'python3.10'
+      Timeout: 60
+      MemorySize: 128
+
+  # 定义 Lambda 函数 3
+  LambdaFunction3:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: 'LambdaTask3'
+      Handler: 'index.handler'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              # Task 3 logic
+              print("Executing Task 3")
+              return {"status": "Task 3 Completed"}
+      Runtime: 'python3.10'
+      Timeout: 60
+      MemorySize: 128
+
+  # 定义 Step Functions 状态机
+  StateMachine:
+    Type: 'AWS::StepFunctions::StateMachine'
+    Properties:
+      StateMachineName: 'LambdaStepFunction'
+      RoleArn: !GetAtt StepFunctionExecutionRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "State Machine to execute 3 Lambda functions sequentially",
+          "StartAt": "Task1",
+          "States": {
+            "Task1": {
+              "Type": "Task",
+              "Resource": "${LambdaFunction1.Arn}",
+              "Next": "Task2"
+            },
+            "Task2": {
+              "Type": "Task",
+              "Resource": "${LambdaFunction2.Arn}",
+              "Next": "Task3"
+            },
+            "Task3": {
+              "Type": "Task",
+              "Resource": "${LambdaFunction3.Arn}",
+              "End": true
+            }
+          }
+        }
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StepFunctionsLogGroup.Arn
+
+  # EventBridge 规则，用于定时触发状态机
+  EventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: 'StepFunctionScheduleRule'
+      ScheduleExpression: !Ref ScheduleExpressionParam
+      State: 'ENABLED'
+      Targets:
+        - Arn: !Ref StateMachine
+          Id: 'StateMachineExecution'
+
+  # EventBridge 目标权限，允许 EventBridge 调用 Step Functions
+  StepFunctionsInvokePermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Ref StateMachine
+      Action: 'lambda:InvokeFunction'
+      Principal: 'events.amazonaws.com'
+      SourceArn: !GetAtt EventRule.Arn
+
+Outputs:
+  StepFunctionARN:
+    Description: 'The ARN of the Step Functions State Machine'
+    Value: !Ref StateMachine
+    Export:
+      Name: 'StepFunctionARN'
+
+  LambdaFunction1ARN:
+    Description: 'The ARN of Lambda Function 1 (Task 1)'
+    Value: !GetAtt LambdaFunction1.Arn
+    Export:
+      Name: 'LambdaFunction1ARN'
+
+  LambdaFunction2ARN:
+    Description: 'The ARN of Lambda Function 2 (Task 2)'
+    Value: !GetAtt LambdaFunction2.Arn
+    Export:
+      Name: 'LambdaFunction2ARN'
+
+  LambdaFunction3ARN:
+    Description: 'The ARN of Lambda Function 3 (Task 3)'
+    Value: !GetAtt LambdaFunction3.Arn
+    Export:
+      Name: 'LambdaFunction3ARN'
+
+  EventRuleARN:
+    Description: 'The ARN of the EventBridge rule that triggers Step Functions'
+    Value: !GetAtt EventRule.Arn
+    Export:
+      Name: 'EventRuleARN'
+
+  LambdaExecutionRoleARN:
+    Description: 'The ARN of the IAM Role for Lambda functions'
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: 'LambdaExecutionRoleARN'
+
+  StepFunctionExecutionRoleARN:
+    Description: 'The ARN of the IAM Role for Step Functions'
+    Value: !GetAtt StepFunctionExecutionRole.Arn
+    Export:
+      Name: 'StepFunctionExecutionRoleARN'
+
+  StepFunctionsLogGroupARN:
+    Description: 'The ARN of the CloudWatch Log Group for Step Functions'
+    Value: !GetAtt StepFunctionsLogGroup.Arn
+    Export:
+      Name: 'StepFunctionsLogGroupARN'
+
+
+
+
+----------------------------------------------------------------------------------------------
+aws cloudformation create-stack --stack-name step-function-scheduled \
+  --template-body file://step-function-scheduled-template.yaml \
+  --parameters ParameterKey=LogGroupNameParam,ParameterValue=/custom/log/group \
+               ParameterKey=RetentionInDaysParam,ParameterValue=30
+----------------------------------------------------------------------------------------------
