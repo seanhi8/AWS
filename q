@@ -1,9 +1,11 @@
 import time
 
-# 获取镜像列表
 for repository in repositories:
-    # 创建稍后处理列表
+    # Create a To Do Later list
     to_be_processed_images = []
+    # Maximum polling time in seconds (e.g., 10 minutes)
+    MAX_POLLING_TIME = 600  
+    polling_start_time = time.time()
 
     describeimage_paginator = ecr_client.get_paginator('describe_images')
     for response_describeimagepaginator in describeimage_paginator.paginate(
@@ -31,9 +33,9 @@ for repository in repositories:
                 elif status in ["FAILED", "ACTIVE", "SCAN_ELIGIBILITY_EXPIRED", "UNSUPPORTED_IMAGE"]:
                     print(f"ERROR {repository['repositoryName']}/{image['imageTags'][0]}: {status}")
 
-    # 定期轮询稍后处理列表，直到列表为空
-    while to_be_processed_images:
-        time.sleep(30)  # 每隔 30 秒轮询一次
+    # Polling loop with timeout
+    while to_be_processed_images and (time.time() - polling_start_time < MAX_POLLING_TIME):
+        time.sleep(30)  # Poll every 30 seconds
 
         # 遍历稍后处理列表中的每个镜像
         for image in to_be_processed_images[:]:  # 创建副本以便在循环中修改列表
@@ -55,6 +57,8 @@ for repository in repositories:
                 print(f"ERROR {image['repositoryName']}/{image['imageTag']}: {status}")
                 to_be_processed_images.remove(image)
 
-            # 状态为 IN_PROGRESS 或 PENDING 时保持在列表中，不进行删除
-
-    print("扫描结束")
+    # Check if timeout was reached
+    if to_be_processed_images:
+        print("Warning: Scanning timed out for some images.")
+    else:
+        print("Scanning complete")
