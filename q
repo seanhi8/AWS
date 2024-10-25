@@ -19,7 +19,7 @@ for repository in repositories:
                 # Wait until the scan status is no longer IN_PROGRESS
                 while status == "IN_PROGRESS":
                     print(f"Scanning in progress for {image['repositoryName']}/{image['imageTags'][0]}...")
-                    time.sleep(10)  # Wait for 10 seconds before checking again
+                    time.sleep(30)  # Wait for 30 seconds before checking again
                     # Re-fetch the image details to check the updated scan status
                     updated_image = ecr_client.describe_images(
                         registryId=repository['registryId'],
