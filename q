@@ -22,6 +22,17 @@ for repository in repositories:
                     print(f"ScanOver {repository['repositoryName']}/{image['imageTags'][0]}: LimitExceededException")
                     continue  # 跳过该镜像，继续处理下一个
 
+                except ClientError as e:
+                    # 检查是否为配额超限错误
+                    if e.response['Error']['Code'] == 'LimitExceededException':
+                        # 如果是配额超限错误，打印一条警告信息并等待
+                        print(f"Warning: Scan limit exceeded for {repository_name}/{image_id['imageTag']}: {e.response['Error']['Message']}")
+                        time.sleep(RETRY_DELAY)  # 等待指定时间后重试
+                        retries += 1  # 增加重试次数
+                    else:
+                        # 如果是其他类型的错误，抛出异常
+                        raise
+
                 # 如果状态为 COMPLETE，直接输出日志
                 if status == "COMPLETE":
                     print(f"COMPLETE {repository['repositoryName']}/{image['imageTags'][0]}")
@@ -56,6 +67,17 @@ for repository in repositories:
                 print(f"ScanOver {image['repositoryName']}/{image['imageTag']}: LimitExceededException")
                 to_be_processed_images.remove(image)
                 continue
+
+            except ClientError as e:
+                # 检查是否为配额超限错误
+                if e.response['Error']['Code'] == 'LimitExceededException':
+                    # 如果是配额超限错误，打印一条警告信息并等待
+                    print(f"Warning: Scan limit exceeded for {repository_name}/{image_id['imageTag']}: {e.response['Error']['Message']}")
+                    time.sleep(RETRY_DELAY)  # 等待指定时间后重试
+                    retries += 1  # 增加重试次数
+                else:
+                    # 如果是其他类型的错误，抛出异常
+                    raise
 
             # 如果扫描状态为 COMPLETE，从列表中移除并输出日志
             if status == "COMPLETE":
