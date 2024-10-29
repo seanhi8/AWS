@@ -1,4 +1,6 @@
 import time
+import boto3
+from botocore.exceptions import ClientError
 
 for repository in repositories:
     # 创建稍后处理列表
