@@ -1,0 +1,44 @@
+#!/bin/bash
+
+# 获取当前日期时间并格式化为 YYYY-MM-DD_HH-MM-SS
+TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+
+# 从环境变量中获取日志目录路径，默认为 "/mnt/c/abc/123/666" 如果未定义，
+   脚本执行的完整记录，包括每条命令的输出和最终状态消息，都将保存在 LOG_FILE 中
+LOG_DIR="${LOG_DIR:-/mnt/c/abc/123/666}" 
+LOG_FILE="$LOG_DIR/run_log_$TIMESTAMP.txt"
+
+
+# 确保日志目录存在，不存在则创建
+if [ ! -d "$LOG_DIR" ]; then
+    echo "Log directory does not exist. Creating: $LOG_DIR"
+    mkdir -p "$LOG_DIR"
+fi
+
+# 创建新日志文件
+> "$LOG_FILE"
+
+# 定义一个函数来运行命令并处理结果
+run_command() {
+    echo "Running: $1" | tee -a "$LOG_FILE"
+    eval "$1" >> "$LOG_FILE" 2>&1
+    if [ $? -ne 0 ]; then
+        echo "Error: Command '$1' failed. Check the log at $LOG_FILE for details." | tee -a "$LOG_FILE"
+        exit 1
+    else
+        echo "Success: Command '$1' completed." | tee -a "$LOG_FILE"
+    fi
+}
+
+# 执行命令并记录日志
+run_command "mkdir 123"
+run_command "sudo -su"
+run_command "cd 12345678"
+
+# 全部完成后输出成功消息
+if [ $? -eq 0 ]; then
+    echo "All commands executed successfully!" | tee -a "$LOG_FILE" # 如果所有命令执行成功，输出“全部执行成功”的消息
+else
+    echo "Some commands failed. Check the log at $LOG_FILE for details." | tee -a "$LOG_FILE" # 如果有任何命令失败，则输出“部分命令执行失败”的提示
+
+fi
