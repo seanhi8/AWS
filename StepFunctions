@@ -1,248 +1,433 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: CloudFormation template to deploy 3 Lambda functions with AWS Step Functions, scheduled EventBridge trigger, and customizable CloudWatch Logs for Step Functions.
+Description: 部署用于 EC2 指标分析的 Lambda 函数和 Step Functions，并将结果输出到 S3
 
 Parameters:
-  ScheduleExpressionParam:
-    Type: String
-    Description: 'The schedule expression (e.g., rate(1 day), cron(0 12 * * ? *))'
-    Default: 'rate(1 day)'
-
-  LogGroupNameParam:
-    Type: String
-    Description: 'The name of the CloudWatch Log Group for Step Functions'
-    Default: '/aws/vendedlogs/step-functions'
-
-  RetentionInDaysParam:
+  RetryInterval:
     Type: Number
-    Description: 'The number of days to retain logs in CloudWatch Log Group'
-    Default: 14
+    Default: 2
+    Description: "重试之间的时间间隔（秒）。"
+
+  MaxRetryAttempts:
+    Type: Number
+    Default: 3
+    Description: "最大重试次数。"
+
+  BackoffRate:
+    Type: Number
+    Default: 2.0
+    Description: "指数退避的退避率。"
+
+  LogGroupName:
+    Type: String
+    Default: "/aws/vendedlogs/StepFunctions/MyStateMachine"
+    Description: "Step Functions 日志组的名称。"
+
+  S3BucketName:
+    Type: String
+    Default: "my-s3-bucket"
+    Description: "存储结果的 S3 桶名称。"
+
+  S3Path:
+    Type: String
+    Default: "ABC"
+    Description: "存储结果的 S3 路径。"
+
+  MetricName:
+    Type: String
+    Default: "ExecutionFailed"
+    Description: "要监控的 CloudWatch 指标名称。"
+
+  SnsTopicArn:
+    Type: String
+    Description: "用于警报通知的 SNS 主题 ARN。"
+
+  ScheduleExpression:
+    Type: String
+    Default: "cron(0 0 1 * ? *)"
+    Description: "EventBridge 规则的调度表达式。"
+
 
 Resources:
-  # CloudWatch Log Group for Step Functions logs
-  StepFunctionsLogGroup:
-    Type: 'AWS::Logs::LogGroup'
+  LogGroup:
+    Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Ref LogGroupNameParam  # 使用参数化的 Log Group 名称
-      RetentionInDays: !Ref RetentionInDaysParam  # 使用参数化的日志保留天数
+      LogGroupName: !Ref LogGroupName
+      RetentionInDays: 14
 
-  # Lambda 执行角色
   LambdaExecutionRole:
-    Type: 'AWS::IAM::Role'
-    Properties: 
-      AssumeRolePolicyDocument: 
-        Version: '2012-10-17'
-        Statement:
-          - Effect: 'Allow'
-            Principal: 
-              Service: 'lambda.amazonaws.com'
-            Action: 'sts:AssumeRole'
-      Policies: 
-        - PolicyName: 'LambdaBasicExecutionPolicy'
-          PolicyDocument: 
-            Version: '2012-10-17'
-            Statement:
-              - Effect: 'Allow'
-                Action:
-                  - 'logs:CreateLogGroup'
-                  - 'logs:CreateLogStream'
-                  - 'logs:PutLogEvents'
-                Resource: '*'
-
-  # Step Functions 执行角色，添加 CloudWatch Logs 权限
-  StepFunctionExecutionRole:
-    Type: 'AWS::IAM::Role'
+    Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Effect: 'Allow'
+          - Effect: Allow
             Principal:
-              Service: 'states.amazonaws.com'
-            Action: 'sts:AssumeRole'
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
       Policies:
-        - PolicyName: 'StepFunctionsLambdaInvokePolicy'
+        - PolicyName: LambdaBasicExecution
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Effect: 'Allow'
+              - Effect: Allow
                 Action:
-                  - 'lambda:InvokeFunction'
-                Resource:
-                  - !GetAtt LambdaFunction1.Arn
-                  - !GetAtt LambdaFunction2.Arn
-                  - !GetAtt LambdaFunction3.Arn
-        - PolicyName: 'StepFunctionsCloudWatchLogsPolicy'
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: 'Allow'
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              - Effect: Allow
                 Action:
-                  - 'logs:CreateLogStream'
-                  - 'logs:PutLogEvents'
-                Resource: 
-                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${LogGroupNameParam}:*'
+                  - s3:PutObject
+                  - s3:HeadBucket
+                Resource: !Sub "arn:aws:s3:::${S3BucketName}/${S3Path}/*"
 
-  # 定义 Lambda 函数 1
-  LambdaFunction1:
-    Type: 'AWS::Lambda::Function'
+  CpuAnalysisFunction:
+    Type: AWS::Lambda::Function
     Properties:
-      FunctionName: 'LambdaTask1'
-      Handler: 'index.handler'
+      Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Code:
         ZipFile: |
-          def handler(event, context):
-              # Task 1 logic
-              print("Executing Task 1")
-              return {"status": "Task 1 Completed"}
-      Runtime: 'python3.10'
-      Timeout: 60
-      MemorySize: 128
+          import os
+          import boto3
+          import csv
+          from datetime import datetime
+          from botocore.exceptions import ClientError
 
-  # 定义 Lambda 函数 2
-  LambdaFunction2:
-    Type: 'AWS::Lambda::Function'
+          def lambda_handler(event, context):
+              s3 = boto3.client('s3')
+              bucket_name = os.environ['S3_BUCKET_NAME']
+              s3_path = os.environ['S3_PATH']
+
+              try:
+                  s3.head_bucket(Bucket=bucket_name)
+              except ClientError as e:
+                  if e.response['Error']['Code'] == '404':
+                      return {
+                          'statusCode': 404,
+                          'body': f'S3 bucket {bucket_name} does not exist.'
+                      }
+                  else:
+                      return {
+                          'statusCode': 500,
+                          'body': 'Error checking S3 bucket.'
+                      }
+              
+              cpu_data = {"CPU Analysis": "Completed"}
+
+              csv_file = '/tmp/cpu_analysis.csv'
+              with open(csv_file, mode='w', newline='') as file:
+                  writer = csv.writer(file)
+                  writer.writerow(cpu_data.keys())
+                  writer.writerow(cpu_data.values())
+              
+              current_date = datetime.now().strftime('%Y-%m-%d')
+              s3_key = f'{s3_path}/cpu_analysis_{current_date}.csv'
+
+              try:
+                  s3.upload_file(csv_file, bucket_name, s3_key)
+              except ClientError as e:
+                  return {
+                      'statusCode': 500,
+                      'body': f'Error uploading to S3: {e}'
+                  }
+
+              return {
+                  'statusCode': 200,
+                  'body': 'CPU analysis completed and uploaded to S3'
+              }
+      Runtime: python3.12
+      MemorySize: 256
+      Timeout: 900
+      Environment:
+        S3_BUCKET_NAME: !Ref S3BucketName
+        S3_PATH: !Ref S3Path
+
+  MemoryAnalysisFunction:
+    Type: AWS::Lambda::Function
     Properties:
-      FunctionName: 'LambdaTask2'
-      Handler: 'index.handler'
+      Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Code:
         ZipFile: |
-          def handler(event, context):
-              # Task 2 logic
-              print("Executing Task 2")
-              return {"status": "Task 2 Completed"}
-      Runtime: 'python3.10'
-      Timeout: 60
-      MemorySize: 128
+          import os
+          import boto3
+          import csv
+          from datetime import datetime
+          from botocore.exceptions import ClientError
 
-  # 定义 Lambda 函数 3
-  LambdaFunction3:
-    Type: 'AWS::Lambda::Function'
+          def lambda_handler(event, context):
+              s3 = boto3.client('s3')
+              bucket_name = os.environ['S3_BUCKET_NAME']
+              s3_path = os.environ['S3_PATH']
+
+              try:
+                  s3.head_bucket(Bucket=bucket_name)
+              except ClientError as e:
+                  if e.response['Error']['Code'] == '404':
+                      return {
+                          'statusCode': 404,
+                          'body': f'S3 bucket {bucket_name} does not exist.'
+                      }
+                  else:
+                      return {
+                          'statusCode': 500,
+                          'body': 'Error checking S3 bucket.'
+                      }
+
+              memory_data = {"Memory Analysis": "Completed"}
+
+              csv_file = '/tmp/memory_analysis.csv'
+              with open(csv_file, mode='w', newline='') as file:
+                  writer = csv.writer(file)
+                  writer.writerow(memory_data.keys())
+                  writer.writerow(memory_data.values())
+              
+              current_date = datetime.now().strftime('%Y-%m-%d')
+              s3_key = f'{s3_path}/memory_analysis_{current_date}.csv'
+
+              try:
+                  s3.upload_file(csv_file, bucket_name, s3_key)
+              except ClientError as e:
+                  return {
+                      'statusCode': 500,
+                      'body': f'Error uploading to S3: {e}'
+                  }
+
+              return {
+                  'statusCode': 200,
+                  'body': 'Memory analysis completed and uploaded to S3'
+              }
+      Runtime: python3.12
+      MemorySize: 256
+      Timeout: 900
+      Environment:
+        S3_BUCKET_NAME: !Ref S3BucketName
+        S3_PATH: !Ref S3Path
+
+  DiskSpaceAnalysisFunction:
+    Type: AWS::Lambda::Function
     Properties:
-      FunctionName: 'LambdaTask3'
-      Handler: 'index.handler'
+      Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Code:
         ZipFile: |
-          def handler(event, context):
-              # Task 3 logic
-              print("Executing Task 3")
-              return {"status": "Task 3 Completed"}
-      Runtime: 'python3.10'
-      Timeout: 60
-      MemorySize: 128
+          import os
+          import boto3
+          import csv
+          from datetime import datetime
+          from botocore.exceptions import ClientError
 
-  # 定义 Step Functions 状态机
+          def lambda_handler(event, context):
+              s3 = boto3.client('s3')
+              bucket_name = os.environ['S3_BUCKET_NAME']
+              s3_path = os.environ['S3_PATH']
+
+              try:
+                  s3.head_bucket(Bucket=bucket_name)
+              except ClientError as e:
+                  if e.response['Error']['Code'] == '404':
+                      return {
+                          'statusCode': 404,
+                          'body': f'S3 bucket {bucket_name} does not exist.'
+                      }
+                  else:
+                      return {
+                          'statusCode': 500,
+                          'body': 'Error checking S3 bucket.'
+                      }
+
+              disk_data = {"Disk Space Analysis": "Completed"}
+
+              csv_file = '/tmp/disk_analysis.csv'
+              with open(csv_file, mode='w', newline='') as file:
+                  writer = csv.writer(file)
+                  writer.writerow(disk_data.keys())
+                  writer.writerow(disk_data.values())
+              
+              current_date = datetime.now().strftime('%Y-%m-%d')
+              s3_key = f'{s3_path}/disk_analysis_{current_date}.csv'
+
+              try:
+                  s3.upload_file(csv_file, bucket_name, s3_key)
+              except ClientError as e:
+                  return {
+                      'statusCode': 500,
+                      'body': f'Error uploading to S3: {e}'
+                  }
+
+              return {
+                  'statusCode': 200,
+                  'body': 'Disk space analysis completed and uploaded to S3'
+              }
+      Runtime: python3.12
+      MemorySize: 256
+      Timeout: 900
+      Environment:
+        S3_BUCKET_NAME: !Ref S3BucketName
+        S3_PATH: !Ref S3Path
+
   StateMachine:
-    Type: 'AWS::StepFunctions::StateMachine'
+    Type: AWS::StepFunctions::StateMachine
     Properties:
-      StateMachineName: 'LambdaStepFunction'
-      RoleArn: !GetAtt StepFunctionExecutionRole.Arn
-      DefinitionString: !Sub |
-        {
-          "Comment": "State Machine to execute 3 Lambda functions sequentially",
-          "StartAt": "Task1",
-          "States": {
-            "Task1": {
-              "Type": "Task",
-              "Resource": "${LambdaFunction1.Arn}",
-              "Next": "Task2"
-            },
-            "Task2": {
-              "Type": "Task",
-              "Resource": "${LambdaFunction2.Arn}",
-              "Next": "Task3"
-            },
-            "Task3": {
-              "Type": "Task",
-              "Resource": "${LambdaFunction3.Arn}",
-              "End": true
+      DefinitionString:
+        Fn::Sub:
+          - |
+            {
+              "Comment": "A state machine to analyze EC2 metrics",
+              "StartAt": "CpuAnalysis",
+              "States": {
+                "CpuAnalysis": {
+                  "Type": "Task",
+                  "Resource": "${CpuAnalysisFunction.Arn}",
+                  "Next": "MemoryAnalysis",
+                  "Retry": [
+                    {
+                      "ErrorEquals": ["States.ALL"],
+                      "IntervalSeconds": "${RetryInterval}",
+                      "MaxAttempts": ${MaxRetryAttempts},
+                      "BackoffRate": ${BackoffRate}
+                    }
+                  ],
+                  "Catch": [
+                    {
+                      "ErrorEquals": ["States.ALL"],
+                      "ResultPath": "$.error-info",
+                      "Next": "ErrorHandler"
+                    }
+                  ],
+                  "ResultPath": "$.CpuAnalysisResult"
+                },
+                "MemoryAnalysis": {
+                  "Type": "Task",
+                  "Resource": "${MemoryAnalysisFunction.Arn}",
+                  "Next": "DiskSpaceAnalysis",
+                  "Retry": [
+                    {
+                      "ErrorEquals": ["States.ALL"],
+                      "IntervalSeconds": "${RetryInterval}",
+                      "MaxAttempts": ${MaxRetryAttempts},
+                      "BackoffRate": ${BackoffRate}
+                    }
+                  ],
+                  "Catch": [
+                    {
+                      "ErrorEquals": ["States.ALL"],
+                      "ResultPath": "$.error-info",
+                      "Next": "ErrorHandler"
+                    }
+                  ],
+                  "ResultPath": "$.MemoryAnalysisResult"
+                },
+                "DiskSpaceAnalysis": {
+                  "Type": "Task",
+                  "Resource": "${DiskSpaceAnalysisFunction.Arn}",
+                  "End": true,
+                  "Retry": [
+                    {
+                      "ErrorEquals": ["States.ALL"],
+                      "IntervalSeconds": "${RetryInterval}",
+                      "MaxAttempts": ${MaxRetryAttempts},
+                      "BackoffRate": ${BackoffRate}
+                    }
+                  ],
+                  "Catch": [
+                    {
+                      "ErrorEquals": ["States.ALL"],
+                      "ResultPath": "$.error-info",
+                      "Next": "ErrorHandler"
+                    }
+                  ],
+                  "ResultPath": "$.DiskSpaceAnalysisResult"
+                },
+                "ErrorHandler": {
+                  "Type": "Pass",
+                  "ResultPath": "$.error-info",
+                  "Result": {
+                    "ErrorMessage": "An error occurred during execution.",
+                    "ErrorDetails.$": "$.error-info"
+                  },
+                  "End": true
+                }
+              }
             }
-          }
-        }
+          - CpuAnalysisFunction: !GetAtt CpuAnalysisFunction.Arn
+            MemoryAnalysisFunction: !GetAtt MemoryAnalysisFunction.Arn
+            DiskSpaceAnalysisFunction: !GetAtt DiskSpaceAnalysisFunction.Arn
       LoggingConfiguration:
-        Level: ALL
-        IncludeExecutionData: true
         Destinations:
           - CloudWatchLogsLogGroup:
-              LogGroupArn: !GetAtt StepFunctionsLogGroup.Arn
+              LogGroupArn: !GetAtt LogGroup.Arn
+        IncludeExecutionData: true
+        Level: ALL
 
-  # EventBridge 规则，用于定时触发状态机
-  EventRule:
-    Type: 'AWS::Events::Rule'
+  StateMachineFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
     Properties:
-      Name: 'StepFunctionScheduleRule'
-      ScheduleExpression: !Ref ScheduleExpressionParam
-      State: 'ENABLED'
+      AlarmDescription: "Alarm for Step Function execution failures"
+      MetricName: !Ref MetricName
+      Namespace: "AWS/States"
+      Statistic: "Sum"
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: "GreaterThanOrEqualToThreshold"
+      Dimensions:
+        - Name: "StateMachineArn"
+          Value: !Ref StateMachine
+      AlarmActions:
+        - !Ref SnsTopicArn
+      OKActions:
+        - !Ref SnsTopicArn
+      InsufficientDataActions:
+        - !Ref SnsTopicArn
+
+  MonthlyTriggerRule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: !Ref ScheduleExpression  # 使用传入的参数
       Targets:
-        - Arn: !Ref StateMachine
-          Id: 'StateMachineExecution'
+        - Arn: !GetAtt StateMachine.Arn  # 目标为状态机的 ARN
+          Id: "StateMachineTarget"  # 目标 ID
+          RoleArn: !GetAtt LambdaExecutionRole.Arn  # 授予 EventBridge 触发状态机的权限
 
-  # EventBridge 目标权限，允许 EventBridge 调用 Step Functions
-  StepFunctionsInvokePermission:
-    Type: 'AWS::Lambda::Permission'
+  EventBridgeInvokePermission:
+    Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref StateMachine
-      Action: 'lambda:InvokeFunction'
-      Principal: 'events.amazonaws.com'
-      SourceArn: !GetAtt EventRule.Arn
+      Action: "states:StartExecution"  # 允许的操作
+      FunctionName: !GetAtt StateMachine.Arn  # 目标函数为状态机
+      Principal: "events.amazonaws.com"  # 事件桥的服务主体
+      SourceArn: !GetAtt MonthlyTriggerRule.Arn  # 源 ARN
 
 Outputs:
-  StepFunctionARN:
-    Description: 'The ARN of the Step Functions State Machine'
+  StateMachineArn:
+    Description: "ARN of the State Machine"
     Value: !Ref StateMachine
-    Export:
-      Name: 'StepFunctionARN'
 
-  LambdaFunction1ARN:
-    Description: 'The ARN of Lambda Function 1 (Task 1)'
-    Value: !GetAtt LambdaFunction1.Arn
-    Export:
-      Name: 'LambdaFunction1ARN'
+  LogGroupArn:
+    Description: "ARN of the CloudWatch Log Group"
+    Value: !GetAtt LogGroup.Arn
 
-  LambdaFunction2ARN:
-    Description: 'The ARN of Lambda Function 2 (Task 2)'
-    Value: !GetAtt LambdaFunction2.Arn
-    Export:
-      Name: 'LambdaFunction2ARN'
-
-  LambdaFunction3ARN:
-    Description: 'The ARN of Lambda Function 3 (Task 3)'
-    Value: !GetAtt LambdaFunction3.Arn
-    Export:
-      Name: 'LambdaFunction3ARN'
-
-  EventRuleARN:
-    Description: 'The ARN of the EventBridge rule that triggers Step Functions'
-    Value: !GetAtt EventRule.Arn
-    Export:
-      Name: 'EventRuleARN'
-
-  LambdaExecutionRoleARN:
-    Description: 'The ARN of the IAM Role for Lambda functions'
+  LambdaExecutionRoleArn:
+    Description: "ARN of the Lambda Execution Role"
     Value: !GetAtt LambdaExecutionRole.Arn
-    Export:
-      Name: 'LambdaExecutionRoleARN'
 
-  StepFunctionExecutionRoleARN:
-    Description: 'The ARN of the IAM Role for Step Functions'
-    Value: !GetAtt StepFunctionExecutionRole.Arn
-    Export:
-      Name: 'StepFunctionExecutionRoleARN'
+  CpuAnalysisFunctionArn:
+    Description: "ARN of the CPU Analysis Lambda Function"
+    Value: !GetAtt CpuAnalysisFunction.Arn
 
-  StepFunctionsLogGroupARN:
-    Description: 'The ARN of the CloudWatch Log Group for Step Functions'
-    Value: !GetAtt StepFunctionsLogGroup.Arn
-    Export:
-      Name: 'StepFunctionsLogGroupARN'
+  MemoryAnalysisFunctionArn:
+    Description: "ARN of the Memory Analysis Lambda Function"
+    Value: !GetAtt MemoryAnalysisFunction.Arn
 
+  DiskSpaceAnalysisFunctionArn:
+    Description: "ARN of the Disk Space Analysis Lambda Function"
+    Value: !GetAtt DiskSpaceAnalysisFunction.Arn
 
+  StateMachineFailureAlarmArn:
+    Description: "ARN of the State Machine Failure Alarm"
+    Value: !Ref StateMachineFailureAlarm
 
-
-----------------------------------------------------------------------------------------------
-aws cloudformation create-stack --stack-name step-function-scheduled \
-  --template-body file://step-function-scheduled-template.yaml \
-  --parameters ParameterKey=LogGroupNameParam,ParameterValue=/custom/log/group \
-               ParameterKey=RetentionInDaysParam,ParameterValue=30
-----------------------------------------------------------------------------------------------
+  MonthlyTriggerRuleArn:
+    Description: "ARN of the EventBridge Monthly Trigger Rule"
+    Value: !Ref MonthlyTriggerRule
