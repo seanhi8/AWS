@@ -6,41 +6,33 @@ Parameters:
     Type: Number
     Default: 2
     Description: "重试之间的时间间隔（秒）。"
-
   MaxRetryAttempts:
     Type: Number
     Default: 3
     Description: "最大重试次数。"
-
   BackoffRate:
     Type: Number
     Default: 2.0
     Description: "指数退避的退避率。"
-
   LogGroupName:
     Type: String
     Default: "/aws/vendedlogs/StepFunctions/MyStateMachine"
     Description: "Step Functions 日志组的名称。"
-
   S3BucketName:
     Type: String
     Default: "my-s3-bucket"
     Description: "存储结果的 S3 桶名称。"
-
   S3Path:
     Type: String
     Default: "ABC"
     Description: "存储结果的 S3 路径。"
-
   MetricName:
     Type: String
     Default: "ExecutionFailed"
     Description: "要监控的 CloudWatch 指标名称。"
-
   SnsTopicArn:
     Type: String
     Description: "用于警报通知的 SNS 主题 ARN。"
-
   ScheduleExpression:
     Type: String
     Default: "cron(0 0 1 * ? *)"
@@ -86,6 +78,20 @@ Resources:
     Properties:
       Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.12
+      Timeout: 900
+      Architectures:
+        - x86_64
+      MemorySize: 256     
+      EphemeralStorage:
+        Size: 512
+      Environment:
+        Variables:
+          S3_BUCKET_NAME: !Ref S3BucketName
+          S3_PATH: !Ref S3Path
+          A: a
+          B: b
+          C: c
       Code:
         ZipFile: |
           import os
@@ -136,18 +142,26 @@ Resources:
                   'statusCode': 200,
                   'body': 'CPU analysis completed and uploaded to S3'
               }
-      Runtime: python3.12
-      MemorySize: 256
-      Timeout: 900
-      Environment:
-        S3_BUCKET_NAME: !Ref S3BucketName
-        S3_PATH: !Ref S3Path
 
   MemoryAnalysisFunction:
     Type: AWS::Lambda::Function
     Properties:
       Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.12
+      Timeout: 900
+      Architectures:
+        - x86_64
+      MemorySize: 256     
+      EphemeralStorage:
+        Size: 512
+      Environment:
+        Variables:
+          S3_BUCKET_NAME: !Ref S3BucketName
+          S3_PATH: !Ref S3Path
+          A: a
+          B: b
+          C: c
       Code:
         ZipFile: |
           import os
@@ -198,18 +212,26 @@ Resources:
                   'statusCode': 200,
                   'body': 'Memory analysis completed and uploaded to S3'
               }
-      Runtime: python3.12
-      MemorySize: 256
-      Timeout: 900
-      Environment:
-        S3_BUCKET_NAME: !Ref S3BucketName
-        S3_PATH: !Ref S3Path
 
   DiskSpaceAnalysisFunction:
     Type: AWS::Lambda::Function
     Properties:
       Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.12
+      Timeout: 900
+      Architectures:
+        - x86_64
+      MemorySize: 256     
+      EphemeralStorage:
+        Size: 512
+      Environment:
+        Variables:
+          S3_BUCKET_NAME: !Ref S3BucketName
+          S3_PATH: !Ref S3Path
+          A: a
+          B: b
+          C: c
       Code:
         ZipFile: |
           import os
@@ -260,12 +282,6 @@ Resources:
                   'statusCode': 200,
                   'body': 'Disk space analysis completed and uploaded to S3'
               }
-      Runtime: python3.12
-      MemorySize: 256
-      Timeout: 900
-      Environment:
-        S3_BUCKET_NAME: !Ref S3BucketName
-        S3_PATH: !Ref S3Path
 
   StateMachine:
     Type: AWS::StepFunctions::StateMachine
