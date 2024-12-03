@@ -1,0 +1,114 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Template to monitor AWS login events (both success and failure) and send alerts via SNS.
+
+# ------------------------------------------------------------#
+# Parameters
+# ------------------------------------------------------------#
+Parameters:
+  S3BucketName:
+    Type: String
+    Description: The name of the S3 bucket for CloudTrail logs.
+    Default: cloudtrail-logs
+  SNSTopicName:
+    Type: String
+    Description: The name of the SNS topic for notifications.
+    Default: LoginEventAlert-Topic
+  CloudTrailName:
+    Type: String
+    Description: The name of the CloudTrail.
+    Default: EventTrail
+  CloudWatchRuleName:
+    Type: String
+    Description: The name of the CloudWatch Event Rule.
+    Default: LoginMonitorEvent-Rule
+  NotificationEmail:
+    Type: String
+    Description: The email address to receive SNS notifications.
+
+# ------------------------------------------------------------#
+# Resources
+# ------------------------------------------------------------#
+Resources:
+  # S3 Bucket for CloudTrail Logs
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+      AccessControl: Private
+      VersioningConfiguration:
+        Status: Enabled
+
+  # SNS Topic for Notifications
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Ref SNSTopicName
+      DisplayName: LoginEventAlerts
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref NotificationEmail  # Using the parameter for the email address
+
+  # IAM Policy to Allow Events Rule to Publish to SNS
+  RuleTargetPolicy:
+    Type: AWS::IAM::Policy
+    DependsOn: SNSTopic  # created after SNSTopic
+    Properties:
+      PolicyName: AllowEventsToPublishToSNS
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: "sns:Publish"
+            Resource: !GetAtt SNSTopic.Arn
+      Roles: []  # Replace with the ARN of the roles that need permission if applicable
+
+  # CloudWatch Event Rule for Login Events (Success and Failure)
+  LoginEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Ref CloudWatchRuleName
+      Description: Rule to capture AWS Console login events (success and failure).
+      EventPattern:
+        source:
+          - "aws.signin"
+        detail-type:
+          - "AWS Console Sign In via CloudTrail"
+        detail:
+          eventName: ["ConsoleLogin"]
+          responseElements:
+            ConsoleLogin:
+              - "Success"
+              - "Failure"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SNSTopic.Arn
+          Id: LoginEventTarget
+
+  # CloudTrail
+  CloudTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: S3Bucket  # created after S3Bucket
+    Properties:
+      TrailName: !Ref CloudTrailName
+      S3BucketName: !Ref S3Bucket
+      IncludeGlobalServiceEvents: true
+      IsMultiRegionTrail: true
+      EnableLogFileValidation: true
+      EventSelectors:
+        - ReadWriteType: All
+          IncludeManagementEvents: true
+          DataResources: []
+
+# ------------------------------------------------------------#
+# Outputs
+# ------------------------------------------------------------#
+Outputs:
+  S3BucketName:
+    Description: The S3 bucket for CloudTrail logs.
+    Value: !Ref S3Bucket
+  NotificationTopic:
+    Description: The SNS topic for login event alerts.
+    Value: !Ref SNSTopic
+  CloudWatchRule:
+    Description: The CloudWatch rule monitoring login events.
+    Value: !Ref LoginEventRule
