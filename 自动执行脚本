@@ -42,3 +42,48 @@ else
     echo "Some commands failed. Check the log at $LOG_FILE for details." | tee -a "$LOG_FILE" # 如果有任何命令失败，则输出“部分命令执行失败”的提示
 
 fi
+
+
+
+
+import urllib.request
+import sys
+import time
+
+print()
+print('Started System Running Check')
+
+MAX_TIMEOUT = 600  # 最大超时时间 10 分钟
+start_time = time.time()  # 记录开始时间
+
+while True:
+    api_result = True
+
+    for i in range(len(sysnames)):
+        req = urllib.request.Request(url[i])
+        req.add_header('x-cloudf-key', cloudf_key[i])
+        req.add_header('x-eib-key', eib_key[i])
+        req.add_header('x-forwarded-for', x_forwarded_for[i])
+
+        try:
+            with urllib.request.urlopen(req) as res:
+                if res.status != 200:
+                    print(sysnames[i] + ': AWS Service Check Error')
+                    api_result = False
+                else:
+                    print(sysnames[i] + ' is Check OK')
+        except Exception as e:
+            print(sysnames[i] + f': Request failed ({e})')
+            api_result = False
+
+    # 如果所有检查都成功，结束循环
+    if api_result:
+        print('AWS Service Check OK')
+        break
+
+    # 超时检查
+    if time.time() - start_time > MAX_TIMEOUT:
+        print('Health Check Failed: Timed out after 10 minutes.')
+        sys.exit(211)
+
+    time.sleep(10)  # 等待 10 秒后重新执行检查
