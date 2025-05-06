@@ -1,0 +1,272 @@
+import * as cdk from 'aws-cdk-lib';
+import { Construct } from 'constructs';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
+import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as sns from 'aws-cdk-lib/aws-sns';
+import * as sns_actions from 'aws-cdk-lib/aws-sns-actions';
+
+export class StepFunctionStack extends cdk.Stack {
+  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+    super(scope, id, props);
+
+    // 1. 创建用于记录日志的 Lambda 函数
+    const logLambda = new lambda.Function(this, 'LogLambda', {
+      runtime: lambda.Runtime.NODEJS_14_X, // 运行时为 Node.js 14
+      handler: 'index.handler', // Lambda 函数入口
+      code: lambda.Code.fromInline(`
+        exports.handler = async (event) => {
+          console.log('Step execution skipped or failed:', event);  // 打印日志到 CloudWatch Logs
+          return event;  // 返回 event，以便后续处理
+        };
+      `),
+    });
+
+    // 2. 创建 CloudWatch Logs 组，设置日志保留期为 1 年
+    const logGroup = new logs.LogGroup(this, 'MyLogGroup', {
+      retention: logs.RetentionDays.ONE_YEAR, // 设置日志保留期为 1 年
+    });
+
+    // 3. 创建 SNS 主题，用于接收警报
+    const snsTopic = new sns.Topic(this, 'StepFunctionFailureTopic', {
+      displayName: 'Step Function Failure Alerts', // SNS 主题显示名称
+    });
+
+    // 4. 监控 Step Functions 执行失败，设置 CloudWatch 警报
+    const stepFunctionFailureMetric = new cloudwatch.Metric({
+      namespace: 'AWS/States', // Step Functions 的命名空间
+      metricName: 'Failed', // 监控 "Failed" metric
+      dimensionsMap: {
+        StateMachineArn: 'your-state-machine-arn', // 将此替换为你自己的 Step Functions ARN
+      },
+      statistic: 'Sum', // 使用总和 (sum) 统计
+      period: cdk.Duration.minutes(1), // 每 1 分钟计算一次
+    });
+
+    // 创建 CloudWatch 警报，当失败次数 >= 1 时触发
+    const failureAlarm = new cloudwatch.Alarm(this, 'StepFunctionFailureAlarm', {
+      metric: stepFunctionFailureMetric, // 监控 "Failed" metric
+      threshold: 1, // 失败次数阈值为 1
+      evaluationPeriods: 1, // 1 个评估周期
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD, // 比较运算符
+      alarmDescription: 'Alarm when Step Function fails', // 警报描述
+    });
+
+    // 连接警报到 SNS 主题，失败时会通过 SNS 发送通知
+    failureAlarm.addAlarmAction(new sns_actions.SnsAction(snsTopic));
+
+    // 5. 创建 Step Functions 的步骤
+
+    /**
+     * 工具函数：构建一个由多个 Lambda 组成的 Step Functions 子流程
+     * 每个 Lambda 会作为 LambdaInvoke 任务依次执行，使用 .next() 链接
+     */
+    function buildStep(scope: Construct, namePrefix: string, lambdas: lambda.IFunction[]): sfn.IChainable {
+      const tasksList = lambdas.map((fn, index) => new tasks.LambdaInvoke(scope, `${namePrefix}-Lambda${index + 1}`, {
+        lambdaFunction: fn, // 设置 Lambda 函数
+        outputPath: '$.Payload', // 获取 Lambda 函数的输出
+      }));
+
+      // 用 reduce 将多个 Task 串联为一个执行链
+      return tasksList.reduce((chain, nextTask) => chain.next(nextTask));
+    }
+
+    // 假设你已经创建了这些 Lambda 函数，可以替换为 fromFunctionName 或 fromFunctionArn
+    const step1Lambdas = [lambda1, lambda2, lambda3];
+    const step2Lambdas = [lambda4, lambda5, lambda6];
+    const step3Lambdas = [lambda7, lambda8, lambda9];
+    const step4Lambdas = [lambda10, lambda11, lambda12];
+    const step5Lambdas = [lambda13, lambda14, lambda15];
+
+    // 构建每个步骤的任务链
+    const step1 = buildStep(this, 'Step1', step1Lambdas);
+    const step2 = buildStep(this, 'Step2', step2Lambdas);
+    const step3 = buildStep(this, 'Step3', step3Lambdas);
+    const step4 = buildStep(this, 'Step4', step4Lambdas);
+    const step5 = buildStep(this, 'Step5', step5Lambdas);
+
+    // 6. 创建跳过步骤用的 Pass 节点
+    const skip2 = new sfn.Pass(this, 'SkipStep2');
+    const skip3 = new sfn.Pass(this, 'SkipStep3');
+    const skip4 = new sfn.Pass(this, 'SkipStep4');
+    const skip5 = new sfn.Pass(this, 'SkipStep5');
+    const endState = new sfn.Pass(this, 'End');
+
+    // 7. 处理步骤执行的判断：判断 $.output 是否为 'yesdoit'，决定是否执行下一个 Step
+    const check1 = new sfn.Choice(this, 'Check Step1 Output')
+      .when(sfn.Condition.stringEquals('$.output', 'yesdoit'), step2)  // 如果 output 为 'yesdoit'，执行 step2
+      .otherwise(skip2);  // 否则跳过 step2
+
+    const check2 = new sfn.Choice(this, 'Check Step2 Output')
+      .when(sfn.Condition.stringEquals('$.output', 'yesdoit'), step3)
+      .otherwise(skip3);
+
+    const check3 = new sfn.Choice(this, 'Check Step3 Output')
+      .when(sfn.Condition.stringEquals('$.output', 'yesdoit'), step4)
+      .otherwise(skip4);
+
+    const check4 = new sfn.Choice(this, 'Check Step4 Output')
+      .when(sfn.Condition.stringEquals('$.output', 'yesdoit'), step5)
+      .otherwise(skip5);
+
+    // 8. 任务链和跳过节点连接起来
+    step1.next(check1);  // Step1 执行完后检查判断是否执行 Step2
+    step2.next(check2);
+    skip2.next(check2);  // 如果 Step2 被跳过，执行检查 Step3
+
+    step3.next(check3);
+    skip3.next(check3);
+
+    step4.next(check4);
+    skip4.next(check4);
+
+    step5.next(endState);
+    skip5.next(endState);
+
+    // 9. 结合日志记录步骤
+    const logStep = new tasks.LambdaInvoke(this, 'Log Step Skipped', {
+      lambdaFunction: logLambda,  // 使用日志记录的 Lambda
+      payload: sfn.TaskInput.fromObject({
+        message: 'Step was skipped or failed',  // 记录日志的消息
+        stepOutput: '$.output',  // 输出当前 Step 的 output 作为日志
+      }),
+      resultPath: '$.log',  // 保存日志结果
+    });
+
+    // 将 logStep 连接到跳过节点，确保每次跳过时都有日志记录
+    step1.next(logStep).next(check1);
+    step2.next(logStep).next(check2);
+    skip2.next(logStep).next(check2);
+    step3.next(logStep).next(check3);
+    skip3.next(logStep).next(check3);
+    step4.next(logStep).next(check4);
+    skip4.next(logStep).next(check4);
+    step5.next(logStep).next(endState);
+    skip5.next(logStep).next(endState);
+
+    // 10. 创建 Step Functions 状态机
+    new sfn.StateMachine(this, 'ConditionalStateMachine', {
+      definition: step1,  // 从 Step1 开始
+      timeout: cdk.Duration.minutes(15),  // 状态机超时设置为 15 分钟
+    });
+  }
+}
+
+---------------------------------------------------------------------------------------
+代码逻辑详解：
+1.日志记录 Lambda (logLambda)：
+
+这个 Lambda 用来记录所有跳过的步骤和失败的步骤。日志会输出到 CloudWatch Logs，方便后期追踪。
+
+2.CloudWatch Logs 配置：
+
+logGroup 是用来保存 CloudWatch Logs 的日志组。我们设置了日志保留期为 1 年，超过时间后会自动删除。
+
+3.CloudWatch 警报 (failureAlarm)：
+
+我们为 Step Functions 设置了一个 CloudWatch 警报，用来监控状态机的失败。只要 Failed metric 被触发，警报就会通过 SNS 发送通知。
+
+4.状态机步骤 (step1 到 step5)：
+
+每个 Step 由多个 Lambda 组成，任务链使用 .next() 方法连接。每个 Step 的输出传递到下一个步骤。
+
+5.判断条件 (Choice 节点)：
+
+每个步骤的判断条件检查 $.output 是否为 'yesdoit'，如果是，执行下一个步骤。如果不是或没有输出，跳过该步骤。
+
+6.日志记录和跳过节点 (logStep, skipX)：
+
+如果某个步骤被跳过，logStep 会记录日志到 CloudWatch，说明该步骤被跳过或失败。
+
+7.状态机创建：
+
+最后创建了一个状态机，定义了步骤的执行顺序和超时设置。
+---------------------------------------------------------------------------------------
+
+import * as cdk from 'aws-cdk-lib';
+import { Construct } from 'constructs';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
+import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
+
+export class StepFunctionStack extends cdk.Stack {
+  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+    super(scope, id, props);
+
+    /**
+     * 工具函数：构建一个由多个 Lambda 组成的 Step Functions 子流程
+     * 每个 Lambda 会作为 LambdaInvoke Task 依次执行，使用 .next() 链接
+     */
+    function buildStep(scope: Construct, namePrefix: string, lambdas: lambda.IFunction[]): sfn.IChainable {
+      const tasksList = lambdas.map((fn, index) => new tasks.LambdaInvoke(scope, `${namePrefix}-Lambda${index + 1}`, {
+        lambdaFunction: fn,
+        outputPath: '$.Payload',
+      }));
+
+      // 用 reduce 将多个 Task 串联为一个执行链
+      return tasksList.reduce((chain, nextTask) => chain.next(nextTask));
+    }
+
+    /**
+     * 假设你已经创建了这些 Lambda 函数，可替换为 fromFunctionName 或 fromFunctionArn
+     */
+    const step1Lambdas = [lambda1, lambda2, lambda3];
+    const step2Lambdas = [lambda4, lambda5, lambda6];
+    const step3Lambdas = [lambda7, lambda8, lambda9];
+    const step4Lambdas = [lambda10, lambda11, lambda12];
+    const step5Lambdas = [lambda13, lambda14, lambda15];
+
+    // 构建每个步骤的任务链
+    const step1 = buildStep(this, 'Step1', step1Lambdas);
+    const step2 = buildStep(this, 'Step2', step2Lambdas);
+    const step3 = buildStep(this, 'Step3', step3Lambdas);
+    const step4 = buildStep(this, 'Step4', step4Lambdas);
+    const step5 = buildStep(this, 'Step5', step5Lambdas);
+
+    // 创建跳过步骤用的 Pass 节点
+    const skip2 = new sfn.Pass(this, 'SkipStep2');
+    const skip3 = new sfn.Pass(this, 'SkipStep3');
+    const skip4 = new sfn.Pass(this, 'SkipStep4');
+    const skip5 = new sfn.Pass(this, 'SkipStep5');
+    const endState = new sfn.Pass(this, 'End');
+
+    // 每个 Choice 判断是否 output == 'yes'
+    const check1 = new sfn.Choice(this, 'Check Step1 Output')
+      .when(sfn.Condition.stringEquals('$.output', 'yes'), step2)
+      .otherwise(skip2);
+
+    const check2 = new sfn.Choice(this, 'Check Step2 Output')
+      .when(sfn.Condition.stringEquals('$.output', 'yes'), step3)
+      .otherwise(skip3);
+
+    const check3 = new sfn.Choice(this, 'Check Step3 Output')
+      .when(sfn.Condition.stringEquals('$.output', 'yes'), step4)
+      .otherwise(skip4);
+
+    const check4 = new sfn.Choice(this, 'Check Step4 Output')
+      .when(sfn.Condition.stringEquals('$.output', 'yes'), step5)
+      .otherwise(skip5);
+
+    // 串联整个流程：Step1 -> Check -> Step2 -> Check -> ... -> Step5 -> End
+    step1.next(check1);
+    step2.next(check2);
+    skip2.next(check2);
+
+    step3.next(check3);
+    skip3.next(check3);
+
+    step4.next(check4);
+    skip4.next(check4);
+
+    step5.next(endState);
+    skip5.next(endState);
+
+    // 创建状态机
+    new sfn.StateMachine(this, 'ConditionalStateMachine', {
+      definition: step1,
+      timeout: cdk.Duration.minutes(15),
+    });
+  }
+}
