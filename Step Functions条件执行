@@ -184,6 +184,191 @@ logGroup 是用来保存 CloudWatch Logs 的日志组。我们设置了日志保
 
 最后创建了一个状态机，定义了步骤的执行顺序和超时设置。
 ---------------------------------------------------------------------------------------
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Step Functions workflow with conditional branches and CloudWatch alarm
+
+Parameters:
+  Lambda1Arn:
+    Type: String
+  Lambda2Arn:
+    Type: String
+  Lambda3Arn:
+    Type: String
+  Lambda4Arn:
+    Type: String
+  Lambda5Arn:
+    Type: String
+  Lambda6Arn:
+    Type: String
+  Lambda7Arn:
+    Type: String
+  Lambda8Arn:
+    Type: String
+  Lambda9Arn:
+    Type: String
+  Lambda10Arn:
+    Type: String
+  Lambda11Arn:
+    Type: String
+  Lambda12Arn:
+    Type: String
+  Lambda13Arn:
+    Type: String
+  Lambda14Arn:
+    Type: String
+  Lambda15Arn:
+    Type: String
+  LogLambdaArn:
+    Type: String
+
+Resources:
+  StepFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AllowLambdaInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: '*'
+
+  StepFunctionStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: !GetAtt StepFunctionExecutionRole.Arn
+      StateMachineType: STANDARD
+      DefinitionString:
+        Fn::Sub: |
+          {
+            "StartAt": "Step1-Lambda1",
+            "States": {
+              "Step1-Lambda1": { "Type": "Task", "Resource": "${Lambda1Arn}", "Next": "Step1-Lambda2" },
+              "Step1-Lambda2": { "Type": "Task", "Resource": "${Lambda2Arn}", "Next": "Step1-Lambda3" },
+              "Step1-Lambda3": { "Type": "Task", "Resource": "${Lambda3Arn}", "Next": "Step1-Log" },
+              "Step1-Log": {
+                "Type": "Task",
+                "Resource": "${LogLambdaArn}",
+                "Next": "Step1-Choice",
+                "Parameters": {
+                  "message": "Step1 was skipped or failed"
+                }
+              },
+              "Step1-Choice": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.output",
+                    "StringEquals": "yesdoit",
+                    "Next": "Step2-Lambda4"
+                  }
+                ],
+                "Default": "Step2-Skip"
+              },
+
+              "Step2-Skip": { "Type": "Pass", "Next": "Step2-Log" },
+              "Step2-Log": {
+                "Type": "Task",
+                "Resource": "${LogLambdaArn}",
+                "Next": "Step2-Choice",
+                "Parameters": {
+                  "message": "Step2 was skipped or failed"
+                }
+              },
+              "Step2-Choice": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.output",
+                    "StringEquals": "yesdoit",
+                    "Next": "Step3-Lambda7"
+                  }
+                ],
+                "Default": "Step3-Skip"
+              },
+              "Step2-Lambda4": { "Type": "Task", "Resource": "${Lambda4Arn}", "Next": "Step2-Lambda5" },
+              "Step2-Lambda5": { "Type": "Task", "Resource": "${Lambda5Arn}", "Next": "Step2-Lambda6" },
+              "Step2-Lambda6": { "Type": "Task", "Resource": "${Lambda6Arn}", "Next": "Step2-Log" },
+
+              "Step3-Skip": { "Type": "Pass", "Next": "Step3-Log" },
+              "Step3-Log": {
+                "Type": "Task",
+                "Resource": "${LogLambdaArn}",
+                "Next": "Step3-Choice",
+                "Parameters": {
+                  "message": "Step3 was skipped or failed"
+                }
+              },
+              "Step3-Choice": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.output",
+                    "StringEquals": "yesdoit",
+                    "Next": "Step4-Lambda10"
+                  }
+                ],
+                "Default": "Step4-Skip"
+              },
+              "Step3-Lambda7": { "Type": "Task", "Resource": "${Lambda7Arn}", "Next": "Step3-Lambda8" },
+              "Step3-Lambda8": { "Type": "Task", "Resource": "${Lambda8Arn}", "Next": "Step3-Lambda9" },
+              "Step3-Lambda9": { "Type": "Task", "Resource": "${Lambda9Arn}", "Next": "Step3-Log" },
+
+              "Step4-Skip": { "Type": "Pass", "Next": "Step4-Log" },
+              "Step4-Log": {
+                "Type": "Task",
+                "Resource": "${LogLambdaArn}",
+                "Next": "Step4-Choice",
+                "Parameters": {
+                  "message": "Step4 was skipped or failed"
+                }
+              },
+              "Step4-Choice": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.output",
+                    "StringEquals": "yesdoit",
+                    "Next": "Step5-Lambda13"
+                  }
+                ],
+                "Default": "Step5-Skip"
+              },
+              "Step4-Lambda10": { "Type": "Task", "Resource": "${Lambda10Arn}", "Next": "Step4-Lambda11" },
+              "Step4-Lambda11": { "Type": "Task", "Resource": "${Lambda11Arn}", "Next": "Step4-Lambda12" },
+              "Step4-Lambda12": { "Type": "Task", "Resource": "${Lambda12Arn}", "Next": "Step4-Log" },
+
+              "Step5-Skip": { "Type": "Pass", "Next": "Step5-Log" },
+              "Step5-Log": {
+                "Type": "Task",
+                "Resource": "${LogLambdaArn}",
+                "Next": "End",
+                "Parameters": {
+                  "message": "Step5 was skipped or failed"
+                }
+              },
+              "Step5-Lambda13": { "Type": "Task", "Resource": "${Lambda13Arn}", "Next": "Step5-Lambda14" },
+              "Step5-Lambda14": { "Type": "Task", "Resource": "${Lambda14Arn}", "Next": "Step5-Lambda15" },
+              "Step5-Lambda15": { "Type": "Task", "Resource": "${Lambda15Arn}", "Next": "Step5-Log" },
+
+              "End": { "Type": "Pass", "End": true }
+            }
+          }
+
+Outputs:
+  StateMachineArn:
+    Description: ARN of the created Step Function
+    Value: !Ref StepFunctionStateMachine
+
+---------------------------------------------------------------------------------------
 
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
