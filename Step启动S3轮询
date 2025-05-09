@@ -1,0 +1,214 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Step Functions workflow to start Step1 and then wait until either Step1 finishes or 60 minutes pass, then poll S3 to conditionally trigger Step2.
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: S3 bucket to monitor
+  Step1StateMachineArn:
+    Type: String
+    Description: ARN of the existing Step1 state machine
+  Step2StateMachineArn:
+    Type: String
+    Description: ARN of the existing Step2 state machine
+
+Resources:
+  CheckBucketLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaS3CheckPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:aws:s3:::${BucketName}
+              - Effect: Allow
+                Action: logs:*
+                Resource: '*'
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: '*'
+
+  CheckBucketLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: check-s3-empty-once
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Timeout: 10
+      Role: !GetAtt CheckBucketLambdaRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref BucketName
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          
+          def lambda_handler(event, context):
+              s3 = boto3.client('s3')
+              bucket = os.environ['BUCKET_NAME']
+              response = s3.list_objects_v2(Bucket=bucket)
+              return {'isEmpty': response.get('KeyCount', 0) == 0}
+
+  StepFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt CheckBucketLambda.Arn
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: '*'
+
+  WrapperStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: wrapper-step1-step2-polling
+      RoleArn: !GetAtt StepFunctionRole.Arn
+      DefinitionString:
+        Fn::Sub: |
+          {
+            "StartAt": "RaceStep1OrTimeout",
+            "States": {
+              "RaceStep1OrTimeout": {
+                "Type": "Parallel",
+                "Branches": [
+                  {
+                    "StartAt": "StartStep1Async",
+                    "States": {
+                      "StartStep1Async": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::states:startExecution",
+                        "Parameters": {
+                          "StateMachineArn": "${Step1StateMachineArn}",
+                          "Input": {}
+                        },
+                        "End": true
+                      }
+                    }
+                  },
+                  {
+                    "StartAt": "Wait60Minutes",
+                    "States": {
+                      "Wait60Minutes": {
+                        "Type": "Wait",
+                        "Seconds": 3600,
+                        "End": true
+                      }
+                    }
+                  }
+                ],
+                "Next": "InitPollingVars"
+              },
+              "InitPollingVars": {
+                "Type": "Pass",
+                "Result": {
+                  "count": 0,
+                  "streak": 0
+                },
+                "ResultPath": "$.vars",
+                "Next": "CheckS3"
+              },
+              "CheckS3": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${CheckBucketLambda}",
+                  "Payload": {}
+                },
+                "ResultPath": "$.check",
+                "Next": "EvaluateCheck"
+              },
+              "EvaluateCheck": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.check.Payload.isEmpty",
+                    "BooleanEquals": true,
+                    "Next": "IncStreak"
+                  }
+                ],
+                "Default": "ResetStreak"
+              },
+              "IncStreak": {
+                "Type": "Pass",
+                "Parameters": {
+                  "vars.count.$": "$.vars.count",
+                  "vars.streak.$": "States.MathAdd($.vars.streak, 1)",
+                  "vars.countNext.$": "States.MathAdd($.vars.count, 1)"
+                },
+                "ResultPath": "$.vars",
+                "Next": "CheckEnd"
+              },
+              "ResetStreak": {
+                "Type": "Pass",
+                "Parameters": {
+                  "vars.count.$": "$.vars.count",
+                  "vars.streak": 0,
+                  "vars.countNext.$": "States.MathAdd($.vars.count, 1)"
+                },
+                "ResultPath": "$.vars",
+                "Next": "CheckEnd"
+              },
+              "CheckEnd": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.vars.streak",
+                    "NumericGreaterThanEquals": 5,  # check count
+                    "Next": "TriggerStep2"
+                  },
+                  {
+                    "Variable": "$.vars.countNext",
+                    "NumericLessThan": 60,
+                    "Next": "Wait1Minute"
+                  }
+                ],
+                "Default": "Done"
+              },
+              "Wait1Minute": {
+                "Type": "Wait",
+                "Seconds": 60,
+                "Next": "CheckS3"
+              },
+              "TriggerStep2": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${Step2StateMachineArn}",
+                  "Input": {}
+                },
+                "End": true
+              },
+              "Done": {
+                "Type": "Succeed"
+              }
+            }
+          }
+
+Outputs:
+  StateMachineArn:
+    Value: !Ref WrapperStateMachine
+    Description: ARN of the wrapper Step Function
