@@ -455,3 +455,210 @@ export class StepFunctionStack extends cdk.Stack {
     });
   }
 }
+
+
+
+
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 複雑な条件分岐を含む 5 段階のステップ関数ワークフロー（Lambda による判定）
+
+Resources:
+  MyStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: My5StepWorkflow
+      RoleArn: arn:aws:iam::123456789012:role/StepFunctionsExecutionRole  # 必要な実行ロールに置き換えてください
+      Definition:
+        Version: '1.0'
+        Comment: "5ステップのワークフロー。各ステップ間に複雑な条件判定あり。Lambdaによる実装。"
+        StartAt: State1
+        States:
+
+          # --- ステップ 1 ---
+          State1:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:State1Function  # ステップ1の処理Lambda
+            Next: Judge1
+
+          # 判定用Lambda（ステップ1 → ステップ2 の間で使用）
+          Judge1:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:Judge1Function
+            ResultPath: $.judgeResult  # 戻り値は $.judgeResult.condition に格納される
+            Next: Choice1
+
+          # 条件に基づき分岐
+          Choice1:
+            Type: Choice
+            Choices:
+              - Variable: $.judgeResult.condition
+                StringEquals: a
+                Next: DoA1
+              - Variable: $.judgeResult.condition
+                StringEquals: b
+                Next: DoB1
+              - Variable: $.judgeResult.condition
+                StringEquals: c
+                Next: DoC1
+            Default: Skip1  # d の場合はスキップ（何もしない）
+
+          DoA1:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:HandleA1
+            Next: State2
+
+          DoB1:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:HandleB1
+            Next: State2
+
+          DoC1:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:HandleC1
+            Next: State2
+
+          Skip1:
+            Type: Pass
+            Next: State2
+
+          # --- ステップ 2 ---
+          State2:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:State2Function
+            Next: Judge2
+
+          Judge2:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:Judge2Function
+            ResultPath: $.judgeResult
+            Next: Choice2
+
+          Choice2:
+            Type: Choice
+            Choices:
+              - Variable: $.judgeResult.condition
+                StringEquals: a
+                Next: DoA2
+              - Variable: $.judgeResult.condition
+                StringEquals: b
+                Next: DoB2
+              - Variable: $.judgeResult.condition
+                StringEquals: c
+                Next: DoC2
+            Default: Skip2
+
+          DoA2:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:HandleA2
+            Next: State3
+
+          DoB2:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:HandleB2
+            Next: State3
+
+          DoC2:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:HandleC2
+            Next: State3
+
+          Skip2:
+            Type: Pass
+            Next: State3
+
+          # --- ステップ 3 ---
+          State3:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:State3Function
+            Next: Judge3
+
+          Judge3:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:Judge3Function
+            ResultPath: $.judgeResult
+            Next: Choice3
+
+          Choice3:
+            Type: Choice
+            Choices:
+              - Variable: $.judgeResult.condition
+                StringEquals: a
+                Next: DoA3
+              - Variable: $.judgeResult.condition
+                StringEquals: b
+                Next: DoB3
+              - Variable: $.judgeResult.condition
+                StringEquals: c
+                Next: DoC3
+            Default: Skip3
+
+          DoA3:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:HandleA3
+            Next: State4
+
+          DoB3:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:HandleB3
+            Next: State4
+
+          DoC3:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:HandleC3
+            Next: State4
+
+          Skip3:
+            Type: Pass
+            Next: State4
+
+          # --- ステップ 4 ---
+          State4:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:State4Function
+            Next: Judge4
+
+          Judge4:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:Judge4Function
+            ResultPath: $.judgeResult
+            Next: Choice4
+
+          Choice4:
+            Type: Choice
+            Choices:
+              - Variable: $.judgeResult.condition
+                StringEquals: a
+                Next: DoA4
+              - Variable: $.judgeResult.condition
+                StringEquals: b
+                Next: DoB4
+              - Variable: $.judgeResult.condition
+                StringEquals: c
+                Next: DoC4
+            Default: Skip4
+
+          DoA4:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:HandleA4
+            Next: State5
+
+          DoB4:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:HandleB4
+            Next: State5
+
+          DoC4:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:HandleC4
+            Next: State5
+
+          Skip4:
+            Type: Pass
+            Next: State5
+
+          # --- ステップ 5（最終） ---
+          State5:
+            Type: Task
+            Resource: arn:aws:lambda:REGION:ACCOUNT_ID:function:State5Function
+            End: true
