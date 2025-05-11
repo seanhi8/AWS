@@ -1,0 +1,184 @@
+# 🛠️ CDK 主状态机部署指南（含 Mock 测试）
+
+本指南将引导你如何使用 CDK 部署主 Step Function 状态机，并通过 Mock 状态机与 S3 存储桶进行联动测试。
+
+---
+
+## 📦 项目结构说明
+
+你现在拥有 3 个独立的 CDK 项目：
+
+| 项目名称              | 功能说明                              |
+|------------------------|----------------------------------------|
+| `mock-step-functions`  | 模拟 Step1 ~ Step5 的子状态机          |
+| `mock-s3-buckets`      | 创建用于测试的 S3 存储桶 bucket001~003 |
+| `cdk-master-step`      | 实现主控制流程的 Step Function         |
+
+---
+
+## 🚀 部署步骤
+
+### ✅ 第一步：部署 Mock S3 存储桶
+
+```bash
+cd mock-s3-buckets
+npm install
+cdk deploy
+````
+
+📋 请记下终端输出的 bucket 名称：
+
+```
+Bucket001Name = mock-bucket-001-123456789012-us-east-1
+Bucket002Name = mock-bucket-002-123456789012-us-east-1
+Bucket003Name = mock-bucket-003-123456789012-us-east-1
+```
+
+---
+
+### ✅ 第二步：部署 Mock 子状态机 Step1 \~ Step5
+
+```bash
+cd mock-step-functions
+npm install
+cdk deploy
+```
+
+📋 请记下终端输出的每个状态机 ARN：
+
+```
+Step1Arn = arn:aws:states:us-east-1:123456789012:stateMachine:mock-step-1
+...
+```
+
+---
+
+### ✅ 第三步：配置主项目 `.env` 文件
+
+编辑文件：`cdk-master-step/.env`
+
+```env
+STEP1_ARN=arn:aws:states:us-east-1:...:mock-step-1
+STEP2_ARN=...
+STEP3_ARN=...
+STEP4_ARN=...
+STEP5_ARN=...
+
+BUCKET001=mock-bucket-001-123456789012-us-east-1
+BUCKET002=mock-bucket-002-123456789012-us-east-1
+BUCKET003=mock-bucket-003-123456789012-us-east-1
+```
+
+---
+
+### ✅ 第四步：部署主状态机
+
+```bash
+cd cdk-master-step
+npm install
+./deploy.sh
+```
+
+---
+
+## ✅ 状态机输入/输出示例
+
+所有 mock 状态机都接受空对象 `{}` 作为输入，返回固定结构作为输出：
+
+* Step1:
+
+  ```json
+  { "step1Result": { "step": 1, "status": "OK" } }
+  ```
+
+* Step2:
+
+  ```json
+  { "step2Result": { "step": 2, "status": "OK" } }
+  ```
+
+* Step3:
+
+  ```json
+  { "step3Result": { "step": 3, "executed": true } }
+  ```
+
+* Step4:
+
+  ```json
+  { "step4Result": { "step": 4, "status": "OK" } }
+  ```
+
+* Step5:
+
+  ```json
+  { "step5Result": { "step": 5, "executed": true } }
+  ```
+
+---
+
+## 🧪 模拟 S3 存储桶内容变化（测试 Step3 / Step5 条件判断）
+
+### simulate-s3-contents.sh
+
+```bash
+#!/bin/bash
+set -e
+
+BUCKET002="mock-bucket-002-xxxxxxxxxxxx-region"
+BUCKET003="mock-bucket-003-xxxxxxxxxxxx-region"
+
+echo "test" > temp002.txt
+echo "test" > temp003.txt
+
+aws s3 cp temp002.txt s3://$BUCKET002/test-002.txt
+aws s3 cp temp003.txt s3://$BUCKET003/test-003.txt
+```
+
+运行该脚本会向 bucket002 和 bucket003 上传一个测试文件，用于模拟“非空”状态。
+
+---
+
+### clear-s3-buckets.sh
+
+```bash
+#!/bin/bash
+set -e
+
+BUCKET002="mock-bucket-002-xxxxxxxxxxxx-region"
+BUCKET003="mock-bucket-003-xxxxxxxxxxxx-region"
+
+aws s3 rm s3://$BUCKET002 --recursive
+aws s3 rm s3://$BUCKET003 --recursive
+```
+
+运行该脚本可以清空 bucket002 和 bucket003 内容，用于模拟“空”状态。
+
+---
+
+## ✅ 测试主状态机流程
+
+1. 打开 AWS 控制台 → Step Functions 页面；
+2. 选择 `master` 状态机；
+3. 点击“开始执行”（Start execution），输入 `{}`；
+4. 查看执行流图、变量、结果。
+
+---
+
+## 🧹 资源清理（可选）
+
+```bash
+cd mock-s3-buckets && cdk destroy
+cd ../mock-step-functions && cdk destroy
+cd ../cdk-master-step && cdk destroy
+```
+
+---
+
+## 🔐 小提示
+
+* 确保你已正确配置 AWS CLI 的凭证；
+* 如在 GitHub Actions 中使用，需将 ARN 和 bucket 名配置为 Secrets；
+* 所有 mock 资源均支持自动销毁（`removalPolicy: DESTROY` + `autoDeleteObjects`）。
+
+```
