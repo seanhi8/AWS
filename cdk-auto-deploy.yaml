@@ -1,0 +1,161 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  One-click CDK deployment system using S3, ECS Fargate, Step Functions, and Lambda.
+
+Parameters:
+  ECSClusterName:
+    Type: String
+    Description: Name of your ECS cluster
+  SubnetIds:
+    Type: List<String>
+    Description: List of subnet IDs for Fargate task networking
+  SecurityGroupIds:
+    Type: List<String>
+    Description: List of security group IDs for Fargate task networking
+  CDKImage:
+    Type: String
+    Description: Full ECR image URI with CDK + entrypoint.sh (custom image)
+
+Resources:
+
+  # S3 bucket to store your zipped CDK project (e.g. cdk-source/cdk-app.zip)
+  CDKSourceBucket:
+    Type: AWS::S3::Bucket
+
+  # IAM Role for ECS Fargate Task (grants full admin access to deploy CDK)
+  FargateTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  # ECS Fargate Task Definition to run CDK deploy inside container
+  CDKDeployTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities: [FARGATE]
+      Cpu: "1024"
+      Memory: "2048"
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !GetAtt FargateTaskRole.Arn
+      TaskRoleArn: !GetAtt FargateTaskRole.Arn
+      ContainerDefinitions:
+        - Name: cdk-deployer
+          Image: !Ref CDKImage
+          Essential: true
+          Environment:
+            - Name: CDK_S3_BUCKET
+              Value: !Ref CDKSourceBucket
+            - Name: CDK_S3_KEY
+              Value: cdk-source/cdk-app.zip
+          EntryPoint: ["sh", "-c"]
+          Command:
+            - "/entrypoint.sh"
+
+  # IAM Role for Step Function to run ECS task
+  StepFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  # Step Function to trigger ECS Fargate Task to run CDK deploy
+  CDKDeployStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: !GetAtt StepFunctionRole.Arn
+      DefinitionString: !Sub |
+        {
+          "StartAt": "RunCDK",
+          "States": {
+            "RunCDK": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "Parameters": {
+                "Cluster": "${ECSClusterName}",
+                "LaunchType": "FARGATE",
+                "TaskDefinition": "${CDKDeployTaskDefinition.Arn}",
+                "NetworkConfiguration": {
+                  "AwsvpcConfiguration": {
+                    "Subnets": ${SubnetIds},
+                    "SecurityGroups": ${SecurityGroupIds},
+                    "AssignPublicIp": "ENABLED"
+                  }
+                },
+                "Overrides": {
+                  "ContainerOverrides": [
+                    {
+                      "Name": "cdk-deployer",
+                      "Environment": [
+                        { "Name": "CDK_S3_BUCKET", "Value": "${CDKSourceBucket}" },
+                        { "Name": "CDK_S3_KEY", "Value": "cdk-source/cdk-app.zip" }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "End": true
+            }
+          }
+        }
+
+  # IAM Role for Lambda to invoke Step Function
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSStepFunctionsFullAccess
+
+  # Lambda function to trigger Step Function (can be invoked manually or by event)
+  CDKTriggerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: !Sub |
+          import boto3
+          def lambda_handler(event, context):
+              client = boto3.client('stepfunctions')
+              response = client.start_execution(
+                  stateMachineArn='${CDKDeployStateMachine}',
+                  input="{}"
+              )
+              return response
+
+Outputs:
+  BucketName:
+    Description: "Upload your CDK zip to this bucket at cdk-source/cdk-app.zip"
+    Value: !Ref CDKSourceBucket
+
+  LambdaFunctionName:
+    Description: "Invoke this Lambda to trigger CDK deployment"
+    Value: !Ref CDKTriggerLambda
+
+  StateMachineName:
+    Description: "Name of the Step Function that runs CDK"
+    Value: !GetAtt CDKDeployStateMachine.Name
