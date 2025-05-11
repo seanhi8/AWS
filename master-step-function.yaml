@@ -1,0 +1,417 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Master Step Function to control step1 to step5 with conditional logic and S3 polling.
+
+Parameters:
+  Step1StateMachineArn:
+    Type: String
+  Step2StateMachineArn:
+    Type: String
+  Step3StateMachineArn:
+    Type: String
+  Step4StateMachineArn:
+    Type: String
+  Step5StateMachineArn:
+    Type: String
+  Bucket001:
+    Type: String
+    Description: Name of S3 bucket 001
+  Bucket002:
+    Type: String
+    Description: Name of S3 bucket 002
+  Bucket003:
+    Type: String
+    Description: Name of S3 bucket 003
+
+Resources:
+  # IAM role for Lambda function to check S3 bucket
+  CheckS3LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaS3Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: 
+                  - !Sub arn:aws:s3:::${Bucket001}
+                  - !Sub arn:aws:s3:::${Bucket002}
+                  - !Sub arn:aws:s3:::${Bucket003}
+              - Effect: Allow
+                Action: logs:*
+                Resource: '*'
+
+  # Lambda function to check if a given S3 bucket is empty
+  CheckS3Lambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: check-s3-empty
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Timeout: 10
+      Role: !GetAtt CheckS3LambdaRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          def lambda_handler(event, context):
+              s3 = boto3.client('s3')
+              bucket = event['bucket']
+              resp = s3.list_objects_v2(Bucket=bucket)
+              return {'isEmpty': resp.get('KeyCount', 0) == 0}
+
+  # IAM role for Step Function to invoke Lambda and other Step Functions
+  MasterStepFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: MasterStepPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                  - states:StartExecution
+                Resource: "*"
+
+  # The main Step Function (state machine) controlling step1 to step5
+  MasterStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: master
+      RoleArn: !GetAtt MasterStepFunctionRole.Arn
+      DefinitionString:
+        Fn::Sub: |
+          {
+            "StartAt": "RaceStep1orTimeout",
+            "States": {
+              "RaceStep1orTimeout": {
+                "Type": "Parallel",
+                "Branches": [
+                  {
+                    "StartAt": "StartStep1Async",
+                    "States": {
+                      "StartStep1Async": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::states:startExecution",
+                        "Parameters": {
+                          "StateMachineArn": "${Step1StateMachineArn}",
+                          "Input": {}
+                        },
+                        "End": true
+                      }
+                    }
+                  },
+                  {
+                    "StartAt": "Wait60Minutes",
+                    "States": {
+                      "Wait60Minutes": {
+                        "Type": "Wait",
+                        "Seconds": 3600,
+                        "End": true
+                      }
+                    }
+                  }
+                ],
+                "Next": "InitPollingVars"
+              },
+              "InitPollingVars": {
+                "Type": "Pass",
+                "Result": {
+                  "count": 0,
+                  "streak": 0
+                },
+                "ResultPath": "$.vars",
+                "Next": "CheckS3_001"
+              },
+              "CheckS3_001": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${CheckS3Lambda}",
+                  "Payload": {
+                    "bucket": "${Bucket001}"
+                  }
+                },
+                "ResultPath": "$.check",
+                "Next": "EvaluateCheck"
+              },
+              "EvaluateCheck": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.check.Payload.isEmpty",
+                    "BooleanEquals": true,
+                    "Next": "IncStreak"
+                  }
+                ],
+                "Default": "ResetStreak"
+              },
+              "IncStreak": {
+                "Type": "Pass",
+                "Parameters": {
+                  "vars.count.$": "$.vars.count",
+                  "vars.streak.$": "States.MathAdd($.vars.streak, 1)",
+                  "vars.countNext.$": "States.MathAdd($.vars.count, 1)"
+                },
+                "ResultPath": "$.vars",
+                "Next": "CheckEnd"
+              },
+              "ResetStreak": {
+                "Type": "Pass",
+                "Parameters": {
+                  "vars.count.$": "$.vars.count",
+                  "vars.streak": 0,
+                  "vars.countNext.$": "States.MathAdd($.vars.count, 1)"
+                },
+                "ResultPath": "$.vars",
+                "Next": "CheckEnd"
+              },
+              "CheckEnd": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.vars.streak",
+                    "NumericGreaterThanEquals": 5,
+                    "Next": "StartStep2"
+                  },
+                  {
+                    "Variable": "$.vars.countNext",
+                    "NumericLessThan": 60,
+                    "Next": "Wait1Minute"
+                  }
+                ],
+                "Default": "FailWithLog"
+              },
+              "Wait1Minute": {
+                "Type": "Wait",
+                "Seconds": 60,
+                "Next": "CheckS3_001"
+              },
+              "FailWithLog": {
+                "Type": "Fail",
+                "Error": "S3PollTimeout",
+                "Cause": "Polling bucket 001 reached 60 attempts without 5 consecutive empty responses."
+              },
+              "StartStep2": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${Step2StateMachineArn}",
+                  "Input": {}
+                },
+                "Next": "Check002"
+              },
+              "Check002": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${CheckS3Lambda}",
+                  "Payload": {
+                    "bucket": "${Bucket002}"
+                  }
+                },
+                "ResultPath": "$.s3Check002",
+                "Next": "Step3Decision"
+              },
+              "Step3Decision": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.s3Check002.Payload.isEmpty",
+                    "BooleanEquals": false,
+                    "Next": "StartStep3"
+                  }
+                ],
+                "Default": "StartStep4"
+              },
+              "StartStep3": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${Step3StateMachineArn}",
+                  "Input": {}
+                },
+                "Next": "StartStep4"
+              },
+              "StartStep4": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${Step4StateMachineArn}",
+                  "Input": {}
+                },
+                "Next": "Check003"
+              },
+              "Check003": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${CheckS3Lambda}",
+                  "Payload": {
+                    "bucket": "${Bucket003}"
+                  }
+                },
+                "ResultPath": "$.s3Check003",
+                "Next": "Step5Decision"
+              },
+              "Step5Decision": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.s3Check003.Payload.isEmpty",
+                    "BooleanEquals": false,
+                    "Next": "StartStep5"
+                  }
+                ],
+                "Default": "EndLog"
+              },
+              "StartStep5": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${Step5StateMachineArn}",
+                  "Input": {}
+                },
+                "Next": "EndLog"
+              },
+              "EndLog": {
+                "Type": "Pass",
+                "Result": "Workflow Complete",
+                "End": true
+              }
+            }
+          }
+
+Outputs:
+  MasterStateMachineArn:
+    Description: ARN of the master state machine
+    Value: !Ref MasterStateMachine
+
+
+#-------------------------------------------------------------------------------------------------#
+# ▶ Start
+#  ↓
+#┌────────────────────────────────────────────┐
+#│ RaceStep1orTimeout (Parallel State)        │
+#│ ┌────────────────────────┐ ┌─────────────┐ │
+#│ │ StartStep1Async (Task) │ │ Wait60m     │ │
+#│ │  - Start Step1 machine │ │ (Wait 3600s)│ │
+#│ └────────────────────────┘ └─────────────┘ │
+#│ Waits for either one to complete           │
+#└────────────────────────┬───────────────────┘
+#                         ↓
+#┌────────────────────────────────────────────┐
+#│ InitPollingVars (Pass)                     │
+#│ Initializes polling variables:             │
+#│  - count = 0                               │
+#│  - streak = 0                              │
+#└────────────────────────────────────────────┘
+#                         ↓
+#┌──────────────────────────────────────────────┐
+#│ Poll CheckS3_001 (Task)                      │
+#│ - Invokes Lambda to check if bucket 001      │
+#│   is empty                                   │
+#│   Input:  { "bucket": "${Bucket001}" }       │
+#│   Output: { "Payload": { "isEmpty": true } } │
+#└──────────────────────────────────────────────┘
+#                         ↓
+#┌────────────────────────────────────────────┐
+#│ EvaluateCheck (Choice)                     │
+#│ Decision based on bucket 001 status:       │
+#│  - true  → IncStreak                       │
+#│  - false → ResetStreak                     │
+#└────────────────────────────────────────────┘
+
+# 1️⃣ If isEmpty == true:
+#→
+#┌────────────────────────────────────────────┐
+#│ IncStreak (Pass)                           │
+#│ - streak += 1                              │
+#│ - countNext = count + 1                    │
+#└────────────────────────────────────────────┘
+
+# 2️⃣ If isEmpty == false:
+#→
+#┌────────────────────────────────────────────┐
+#│ ResetStreak (Pass)                         │
+#│ - streak = 0                               │
+#│ - countNext = count + 1                    │
+#└────────────────────────────────────────────┘
+
+#                         ↓
+#┌────────────────────────────────────────────┐
+#│ CheckEnd (Choice)                          │
+#│ Logic priority:                            │
+#│ ① streak >= 5 → StartStep2                 │
+#│ ② countNext < 60 → Wait1Minute             │
+#│ Else → FailWithLog                         │
+#└────────────────────────────────────────────┘
+
+# 3️⃣ If streak >= 5:
+#→
+#┌────────────────────────────────────────────┐
+#│ StartStep2 (Task)                          │
+#│ - Starts Step2 state machine               │
+#└────────────────────────────────────────────┘
+#                         ↓
+#┌────────────────────────────────────────────┐
+#│ Check002 (Task)                            │
+#│ - Invokes Lambda to check bucket 002       │
+#└────────────────────────────────────────────┘
+#                         ↓
+#┌────────────────────────────────────────────┐
+#│ Step3Decision (Choice)                     │
+#│ - If not empty → StartStep3 → Step4        │
+#│ - If empty     → Step4                     │
+#└────────────────────────────────────────────┘
+#                         ↓
+#┌────────────────────────────────────────────┐
+#│ Check003 (Task)                            │
+#│ - Invokes Lambda to check bucket 003       │
+#└────────────────────────────────────────────┘
+#                         ↓
+#┌────────────────────────────────────────────┐
+#│ Step5Decision (Choice)                     │
+#│ - If not empty → StartStep5 → EndLog       │
+#│ - If empty     → EndLog                    │
+#└────────────────────────────────────────────┘
+
+# ✅ EndLog (Pass)
+#- Logs result: "Workflow Complete"
+#- Marks workflow as successful end
+
+#---
+
+# 🔁 If countNext < 60:
+#→
+#┌────────────────────────────────────────────┐
+#│ Wait1Minute (Wait)                         │
+#│ - Waits for 60 seconds                     │
+#│ - Then returns to CheckS3_001              │
+#└────────────────────────────────────────────┘
+
+# ❌ If max 60 attempts reached without 5 consecutive empty results:
+#→
+#┌────────────────────────────────────────────┐
+#│ FailWithLog (Fail)                         │
+#│ - Error: "S3PollTimeout"                   │
+#│ - Cause: "Polling bucket 001 reached       │
+#│   60 attempts without 5 consecutive empty" │
+#└────────────────────────────────────────────┘
+#-------------------------------------------------------------------------------------------------#
