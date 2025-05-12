@@ -1,0 +1,650 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Step Function with Lambda trigger and S3 polling . Lambda Input  { "action": "start" }
+
+Parameters:
+  Step1StateMachineArn:
+    Type: String
+  Step2StateMachineArn:
+    Type: String
+  Step3StateMachineArn:
+    Type: String
+  Step4StateMachineArn:
+    Type: String
+  Step5StateMachineArn:
+    Type: String
+  TargetBucket:
+    Type: String
+    Description: S3 bucket to poll
+  MaxPollCount:
+    Type: Number
+    Default: 60
+  RequiredStreak:
+    Type: Number
+    Default: 5
+  WaitSeconds:
+    Type: Number
+    Default: 60
+
+Resources:
+  # IAM Role for the unified Lambda
+  UtilityLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: UtilityLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - states:StartExecution
+                Resource: "*"
+              - Effect: Allow
+                Action: logs:*
+                Resource: "*"
+
+  # Lambda Function (check + start)
+  UtilityLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: utility-handler
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Timeout: 10
+      Role: !GetAtt UtilityLambdaRole.Arn
+      Environment:
+        Variables:
+          StateMachineArn: !Ref MasterStateMachine
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+
+          s3 = boto3.client('s3')
+          sf = boto3.client('stepfunctions')
+
+          def lambda_handler(event, context):
+              action = event.get("action")
+
+              if action == "check":
+                  bucket = event.get("bucket")
+                  if not bucket:
+                      raise ValueError("Missing 'bucket' for check")
+                  resp = s3.list_objects_v2(Bucket=bucket)
+                  return {"isEmpty": resp.get('KeyCount', 0) == 0}
+
+              elif action == "start":
+                  arn = os.environ.get("StateMachineArn")
+                  if not arn:
+                      raise ValueError("Missing StateMachineArn in env")
+                  response = sf.start_execution(
+                      stateMachineArn=arn,
+                      input="{}"
+                  )
+                  return {"status": "started", "executionArn": response["executionArn"]}
+
+              else:
+                  raise ValueError("Invalid action. Must be 'check' or 'start'")
+
+  # Step Function Role
+  MasterStepFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: MasterStepPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                  - states:StartExecution
+                Resource: "*"
+
+  # Main Step Function
+  MasterStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: master
+      RoleArn: !GetAtt MasterStepFunctionRole.Arn
+      DefinitionString:
+        Fn::Sub: |
+          {
+            "StartAt": "StartStep1",
+            "States": {
+              "StartStep1": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${Step1StateMachineArn}",
+                  "Input": {}
+                },
+                "Next": "WaitForStep1",
+                "Catch": [ { "ErrorEquals": ["States.ALL"], "Next": "FailLog" } ]
+              },
+              "WaitForStep1": {
+                "Type": "Wait",
+                "Seconds": 60,
+                "Next": "InitPoll"
+              },
+              "InitPoll": {
+                "Type": "Pass",
+                "Result": {
+                  "count": 0,
+                  "streak": 0
+                },
+                "ResultPath": "$.vars",
+                "Next": "PollLoop"
+              },
+              "PollLoop": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${UtilityLambda}",
+                  "Payload": {
+                    "action": "check",
+                    "bucket": "${TargetBucket}"
+                  }
+                },
+                "ResultPath": "$.check",
+                "Next": "PollDecision"
+              },
+              "PollDecision": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.check.Payload.isEmpty",
+                    "BooleanEquals": true,
+                    "Next": "IncStreak"
+                  }
+                ],
+                "Default": "ResetStreak"
+              },
+              "IncStreak": {
+                "Type": "Pass",
+                "Parameters": {
+                  "vars.count.$": "$.vars.count",
+                  "vars.streak.$": "States.MathAdd($.vars.streak, 1)",
+                  "vars.countNext.$": "States.MathAdd($.vars.count, 1)"
+                },
+                "ResultPath": "$.vars",
+                "Next": "CheckPollEnd"
+              },
+              "ResetStreak": {
+                "Type": "Pass",
+                "Parameters": {
+                  "vars.count.$": "$.vars.count",
+                  "vars.streak": 0,
+                  "vars.countNext.$": "States.MathAdd($.vars.count, 1)"
+                },
+                "ResultPath": "$.vars",
+                "Next": "CheckPollEnd"
+              },
+              "CheckPollEnd": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.vars.streak",
+                    "NumericGreaterThanEquals": ${RequiredStreak},
+                    "Next": "StartStep2"
+                  },
+                  {
+                    "Variable": "$.vars.countNext",
+                    "NumericLessThan": ${MaxPollCount},
+                    "Next": "WaitAndRetry"
+                  }
+                ],
+                "Default": "FailLog"
+              },
+              "WaitAndRetry": {
+                "Type": "Wait",
+                "Seconds": ${WaitSeconds},
+                "Next": "PollLoop"
+              },
+              "StartStep2": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${Step2StateMachineArn}",
+                  "Input": {}
+                },
+                "Next": "CheckForStep3",
+                "Catch": [ { "ErrorEquals": ["States.ALL"], "Next": "FailLog" } ]
+              },
+              "CheckForStep3": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${UtilityLambda}",
+                  "Payload": {
+                    "action": "check",
+                    "bucket": "${TargetBucket}"
+                  }
+                },
+                "ResultPath": "$.check2",
+                "Next": "Step3Decision"
+              },
+              "Step3Decision": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.check2.Payload.isEmpty",
+                    "BooleanEquals": false,
+                    "Next": "StartStep3"
+                  }
+                ],
+                "Default": "StartStep4"
+              },
+              "StartStep3": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${Step3StateMachineArn}",
+                  "Input": {}
+                },
+                "Next": "StartStep4",
+                "Catch": [ { "ErrorEquals": ["States.ALL"], "Next": "FailLog" } ]
+              },
+              "StartStep4": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${Step4StateMachineArn}",
+                  "Input": {}
+                },
+                "Next": "CheckForStep5",
+                "Catch": [ { "ErrorEquals": ["States.ALL"], "Next": "FailLog" } ]
+              },
+              "CheckForStep5": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${UtilityLambda}",
+                  "Payload": {
+                    "action": "check",
+                    "bucket": "${TargetBucket}"
+                  }
+                },
+                "ResultPath": "$.check3",
+                "Next": "Step5Decision"
+              },
+              "Step5Decision": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.check3.Payload.isEmpty",
+                    "BooleanEquals": false,
+                    "Next": "StartStep5"
+                  }
+                ],
+                "Default": "SuccessLog"
+              },
+              "StartStep5": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${Step5StateMachineArn}",
+                  "Input": {}
+                },
+                "Next": "SuccessLog",
+                "Catch": [ { "ErrorEquals": ["States.ALL"], "Next": "FailLog" } ]
+              },
+              "SuccessLog": {
+                "Type": "Pass",
+                "Result": "Workflow completed successfully",
+                "End": true
+              },
+              "FailLog": {
+                "Type": "Fail",
+                "Error": "WorkflowFailed",
+                "Cause": "An error occurred during execution"
+              }
+            }
+          }
+
+Outputs:
+  MasterStateMachineArn:
+    Description: ARN of the master state machine
+    Value: !Ref MasterStateMachine
+
+#-------------------------------------------------------------------------------------------------------------------#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Step Function master controller with polling logic and manual Step1 trigger.
+
+Parameters:
+  Step1StateMachineArn:
+    Type: String
+    Default: ' '
+  Step2StateMachineArn:
+    Type: String
+    Default: ' '
+  Step3StateMachineArn:
+    Type: String
+    Default: ' '
+  Step4StateMachineArn:
+    Type: String
+    Default: ' '
+  Step5StateMachineArn:
+    Type: String
+    Default: ' '
+  TargetBucket:
+    Type: String
+    Default: ' '
+    Description: The single S3 bucket to poll
+  MaxPollCount:
+    Type: Number
+    Default: 60
+    Description: Maximum number of polling attempts
+  RequiredStreak:
+    Type: Number
+    Default: 5
+    Description: Required consecutive empty responses before continuing
+  WaitSeconds:
+    Type: Number
+    Default: 60
+    Description: Seconds to wait between polling attempts
+
+Resources:
+  # IAM role for Lambda to check S3
+  CheckS3LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaS3Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:aws:s3:::${TargetBucket}
+              - Effect: Allow
+                Action: logs:*
+                Resource: '*'
+
+  # Lambda function to check if S3 bucket is empty
+  CheckS3Lambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: check-s3-empty
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Timeout: 10
+      Role: !GetAtt CheckS3LambdaRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          def lambda_handler(event, context):
+              s3 = boto3.client('s3')
+              bucket = event['bucket']
+              resp = s3.list_objects_v2(Bucket=bucket)
+              return {'isEmpty': resp.get('KeyCount', 0) == 0}
+
+  # IAM Role for Step Function
+  MasterStepFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                  - states:StartExecution
+                Resource: "*"
+
+  # Manual trigger Lambda (to start Step1)
+  TriggerStep1Lambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: trigger-step1
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Timeout: 10
+      Role: !GetAtt CheckS3LambdaRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          def lambda_handler(event, context):
+              client = boto3.client('stepfunctions')
+              response = client.start_execution(
+                  stateMachineArn=os.environ['MasterStateMachineArn'],
+                  input='{}'
+              )
+              return response
+
+  # Main Step Function
+  MasterStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: master
+      RoleArn: !GetAtt MasterStepFunctionRole.Arn
+      DefinitionString:
+        Fn::Sub: |
+          {
+            "StartAt": "StartStep1",
+            "States": {
+              "StartStep1": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${Step1StateMachineArn}",
+                  "Input": {}
+                },
+                "Next": "WaitForStep1",
+                "Catch": [ { "ErrorEquals": ["States.ALL"], "Next": "FailLog" } ]
+              },
+              "WaitForStep1": {
+                "Type": "Wait",
+                "Seconds": 60,
+                "Next": "InitPoll"
+              },
+              "InitPoll": {
+                "Type": "Pass",
+                "Result": {
+                  "count": 0,
+                  "streak": 0
+                },
+                "ResultPath": "$.vars",
+                "Next": "PollLoop"
+              },
+              "PollLoop": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${CheckS3Lambda}",
+                  "Payload": {
+                    "bucket": "${TargetBucket}"
+                  }
+                },
+                "ResultPath": "$.check",
+                "Next": "PollDecision"
+              },
+              "PollDecision": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.check.Payload.isEmpty",
+                    "BooleanEquals": true,
+                    "Next": "IncStreak"
+                  }
+                ],
+                "Default": "ResetStreak"
+              },
+              "IncStreak": {
+                "Type": "Pass",
+                "Parameters": {
+                  "vars.count.$": "$.vars.count",
+                  "vars.streak.$": "States.MathAdd($.vars.streak, 1)",
+                  "vars.countNext.$": "States.MathAdd($.vars.count, 1)"
+                },
+                "ResultPath": "$.vars",
+                "Next": "CheckPollEnd"
+              },
+              "ResetStreak": {
+                "Type": "Pass",
+                "Parameters": {
+                  "vars.count.$": "$.vars.count",
+                  "vars.streak": 0,
+                  "vars.countNext.$": "States.MathAdd($.vars.count, 1)"
+                },
+                "ResultPath": "$.vars",
+                "Next": "CheckPollEnd"
+              },
+              "CheckPollEnd": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.vars.streak",
+                    "NumericGreaterThanEquals": ${RequiredStreak},
+                    "Next": "StartStep2"
+                  },
+                  {
+                    "Variable": "$.vars.countNext",
+                    "NumericLessThan": ${MaxPollCount},
+                    "Next": "WaitAndRetry"
+                  }
+                ],
+                "Default": "FailLog"
+              },
+              "WaitAndRetry": {
+                "Type": "Wait",
+                "Seconds": ${WaitSeconds},
+                "Next": "PollLoop"
+              },
+              "StartStep2": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${Step2StateMachineArn}",
+                  "Input": {}
+                },
+                "Next": "CheckForStep3",
+                "Catch": [ { "ErrorEquals": ["States.ALL"], "Next": "FailLog" } ]
+              },
+              "CheckForStep3": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${CheckS3Lambda}",
+                  "Payload": {
+                    "bucket": "${TargetBucket}"
+                  }
+                },
+                "ResultPath": "$.check2",
+                "Next": "Step3Decision"
+              },
+              "Step3Decision": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.check2.Payload.isEmpty",
+                    "BooleanEquals": false,
+                    "Next": "StartStep3"
+                  }
+                ],
+                "Default": "StartStep4"
+              },
+              "StartStep3": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${Step3StateMachineArn}",
+                  "Input": {}
+                },
+                "Next": "StartStep4",
+                "Catch": [ { "ErrorEquals": ["States.ALL"], "Next": "FailLog" } ]
+              },
+              "StartStep4": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${Step4StateMachineArn}",
+                  "Input": {}
+                },
+                "Next": "CheckForStep5",
+                "Catch": [ { "ErrorEquals": ["States.ALL"], "Next": "FailLog" } ]
+              },
+              "CheckForStep5": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${CheckS3Lambda}",
+                  "Payload": {
+                    "bucket": "${TargetBucket}"
+                  }
+                },
+                "ResultPath": "$.check3",
+                "Next": "Step5Decision"
+              },
+              "Step5Decision": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.check3.Payload.isEmpty",
+                    "BooleanEquals": false,
+                    "Next": "StartStep5"
+                  }
+                ],
+                "Default": "SuccessLog"
+              },
+              "StartStep5": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "Parameters": {
+                  "StateMachineArn": "${Step5StateMachineArn}",
+                  "Input": {}
+                },
+                "Next": "SuccessLog",
+                "Catch": [ { "ErrorEquals": ["States.ALL"], "Next": "FailLog" } ]
+              },
+              "SuccessLog": {
+                "Type": "Pass",
+                "Result": "Workflow completed successfully",
+                "End": true
+              },
+              "FailLog": {
+                "Type": "Fail",
+                "Error": "WorkflowFailed",
+                "Cause": "An error occurred during execution"
+              }
+            }
+          }
+
+Outputs:
+  MasterStateMachineArn:
+    Description: ARN of the master step function
+    Value: !Ref MasterStateMachine
+
