@@ -1,0 +1,249 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Automatically deploy a zipped CDK (TypeScript) project uploaded to S3 using
+  Lambda + Step Functions. Lambda runs unzip -> npm install -> cdk deploy.
+
+Resources:
+
+  # S3 Bucket for uploading CDK zipped projects
+  CDKUploadBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+
+  # IAM Role for the Lambda function
+  DeployLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CDKDeployLambdaRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess # For simplicity; restrict for production
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # Lambda Function (shared by all Step Function steps)
+  CDKDeployLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: CDKMultiActionDeployLambda
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Timeout: 900
+      MemorySize: 1024
+      Role: !GetAtt DeployLambdaRole.Arn
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const s3 = new AWS.S3();
+          const { execSync } = require('child_process');
+          const fs = require('fs');
+          const path = require('path');
+          const unzipper = require('unzipper');
+          const os = require('os');
+
+          exports.handler = async (event) => {
+            const bucket = event.bucket;
+            const key = event.key;
+            const action = event.action;
+            const tmp = path.join(os.tmpdir(), `cdk-${Date.now()}`);
+            fs.mkdirSync(tmp, { recursive: true });
+
+            const zipPath = path.join(tmp, 'project.zip');
+            const projectDir = path.join(tmp, 'project');
+
+            if (action === 'unzip') {
+              console.log(`Downloading ${key} from ${bucket}...`);
+              const stream = s3.getObject({ Bucket: bucket, Key: key }).createReadStream();
+              await new Promise((res, rej) => {
+                const out = fs.createWriteStream(zipPath);
+                stream.pipe(out).on('finish', res).on('error', rej);
+              });
+
+              console.log(`Unzipping to ${projectDir}...`);
+              await fs.createReadStream(zipPath).pipe(unzipper.Extract({ path: projectDir })).promise();
+              console.log('Unzip complete.');
+            }
+
+            if (action === 'install') {
+              console.log('Running npm install...');
+              execSync('npm install', { cwd: projectDir, stdio: 'inherit' });
+              console.log('Install complete.');
+            }
+
+            if (action === 'deploy') {
+              console.log('Running CDK deploy...');
+              execSync('npx cdk deploy --require-approval never', {
+                cwd: projectDir,
+                stdio: 'inherit',
+                env: { ...process.env }
+              });
+              console.log('Deploy complete.');
+            }
+
+            return { status: 'OK', step: action };
+          };
+
+  # Lambda permission so S3 can invoke it
+  LambdaPermissionForS3:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CDKDeployLambda
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !GetAtt CDKUploadBucket.Arn
+
+  # Step Function Execution Role
+  StepFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CDKStepFunctionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: '*'
+
+  # Step Function State Machine (3 steps: unzip → install → deploy)
+  CDKDeployStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: CDKDeployStateMachine
+      RoleArn: !GetAtt StepFunctionRole.Arn
+      LoggingConfiguration:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StepFunctionLogGroup.Arn
+        Level: ALL
+        IncludeExecutionData: true
+      DefinitionString:
+        !Sub |
+          {
+            "StartAt": "Unzip",
+            "States": {
+              "Unzip": {
+                "Type": "Task",
+                "Resource": "${CDKDeployLambda.Arn}",
+                "Parameters": {
+                  "bucket.$": "$.bucket",
+                  "key.$": "$.key",
+                  "action": "unzip"
+                },
+                "Next": "Install"
+              },
+              "Install": {
+                "Type": "Task",
+                "Resource": "${CDKDeployLambda.Arn}",
+                "Parameters": {
+                  "bucket.$": "$.bucket",
+                  "key.$": "$.key",
+                  "action": "install"
+                },
+                "Next": "Deploy"
+              },
+              "Deploy": {
+                "Type": "Task",
+                "Resource": "${CDKDeployLambda.Arn}",
+                "Parameters": {
+                  "bucket.$": "$.bucket",
+                  "key.$": "$.key",
+                  "action": "deploy"
+                },
+                "End": true
+              }
+            }
+          }
+
+  # CloudWatch Log Group for Step Function execution
+  StepFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/stepfunction/CDKDeployLogGroup
+      RetentionInDays: 7
+
+  # Lambda to trigger Step Function when zip uploaded
+  TriggerStepLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: TriggerStepFunctionLambda
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt DeployLambdaRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const sf = new AWS.StepFunctions();
+
+          exports.handler = async (event) => {
+            const record = event.Records[0];
+            const bucket = record.s3.bucket.name;
+            const key = decodeURIComponent(record.s3.object.key.replace(/\+/g, ' '));
+
+            // Bucket validation
+            if (bucket !== process.env.ALLOWED_BUCKET) {
+              console.log(`Unauthorized bucket: ${bucket}`);
+              return;
+            }
+
+            // Only .zip files are allowed
+            if (!key.endsWith('.zip')) {
+              console.log(`Ignored non-zip file: ${key}`);
+              return;
+            }
+
+            const input = JSON.stringify({ bucket, key });
+            const stateMachineArn = process.env.STATE_MACHINE_ARN;
+            await sf.startExecution({ stateMachineArn, input }).promise();
+            return { started: true };
+          };
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref CDKDeployStateMachine
+          ALLOWED_BUCKET: !Ref CDKUploadBucket
+
+  # Allow S3 to trigger the above lambda
+  LambdaPermissionStartStepFunction:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TriggerStepLambda
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !GetAtt CDKUploadBucket.Arn
+
+  # Attach S3 notification to trigger Lambda
+  S3Notification:
+    Type: AWS::S3::BucketNotification
+    Properties:
+      Bucket: !Ref CDKUploadBucket
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .zip
+            Function: !GetAtt TriggerStepLambda.Arn
+
+Outputs:
+  UploadBucket:
+    Description: Upload your CDK .zip package to this bucket to trigger deployment
+    Value: !Ref CDKUploadBucket
+  StepFunction:
+    Description: Step Function handling CDK deployment
+    Value: !Ref CDKDeployStateMachine
