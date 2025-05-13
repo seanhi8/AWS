@@ -1,0 +1,67 @@
+AWSTemplateFormatVersion: '2010-09-09' Description: > CodePipeline triggered by S3 when .yaml or .json files are uploaded, includes approval step for IAM group members, deploys CloudFormation stack with rollback and email failure notification. Dynamically extracts uploaded template filename.
+
+Parameters: S3BucketName: Type: String Description: S3 bucket name used as source for CloudFormation templates. EmailAddress: Type: String Description: Email address to receive approval and failure notifications.
+
+Resources:
+
+IAM group whose members are allowed to approve the deployment
+
+ApprovalGroup: Type: AWS::IAM::Group Properties: GroupName: PipelineApprovers
+
+SNS topic to notify approval group members by email
+
+ApproverTopic: Type: AWS::SNS::Topic Properties: Subscription: - Endpoint: !Ref EmailAddress Protocol: email
+
+IAM role used by CloudFormation to deploy resources
+
+CFNExecutionRole: Type: AWS::IAM::Role Properties: AssumeRolePolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Principal: Service: cloudformation.amazonaws.com Action: sts:AssumeRole Policies: - PolicyName: CFNPolicy PolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Action: '' Resource: ''
+
+IAM role for CodePipeline to assume
+
+PipelineRole: Type: AWS::IAM::Role Properties: AssumeRolePolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Principal: Service: codepipeline.amazonaws.com Action: sts:AssumeRole Policies: - PolicyName: PipelinePolicy PolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Action: - s3:GetObject - s3:GetObjectVersion - s3:PutObject Resource: '' - Effect: Allow Action: iam:PassRole Resource: '' - Effect: Allow Action: codebuild:* Resource: '' - Effect: Allow Action: cloudformation: Resource: '' - Effect: Allow Action: sns:Publish Resource: ''
+
+Pipeline definition using Source output artifact with dynamic template name
+
+Pipeline: Type: AWS::CodePipeline::Pipeline Properties: RoleArn: !GetAtt PipelineRole.Arn ArtifactStore: Type: S3 Location: !Ref S3BucketName Stages: - Name: Source Actions: - Name: S3Source ActionTypeId: Category: Source Owner: AWS Provider: S3 Version: 1 Configuration: S3Bucket: !Ref S3BucketName S3ObjectKey: !Ref LatestTemplateKey PollForSourceChanges: false OutputArtifacts: - Name: SourceArtifact RunOrder: 1
+
+- Name: Approval
+      Actions:
+        - Name: ManualApproval
+          ActionTypeId:
+            Category: Approval
+            Owner: AWS
+            Provider: Manual
+            Version: 1
+          Configuration:
+            CustomData: "Please approve deployment."
+            NotificationArn: !Ref ApproverTopic
+          RunOrder: 1
+
+    - Name: Deploy
+      Actions:
+        - Name: DeployWithCfn
+          ActionTypeId:
+            Category: Deploy
+            Owner: AWS
+            Provider: CloudFormation
+            Version: 1
+          Configuration:
+            ActionMode: CREATE_UPDATE
+            StackName: DynamicStack
+            TemplatePath: SourceArtifact::!Ref LatestTemplateKey
+            Capabilities: CAPABILITY_NAMED_IAM
+            RoleArn: !GetAtt CFNExecutionRole.Arn
+          RunOrder: 1
+
+Parameter passed in from EventBridge trigger to carry object key name
+
+LatestTemplateKey: Type: String Description: Template file key passed dynamically by external mechanism.
+
+IAM role for EventBridge to start CodePipeline execution
+
+EventBridgeInvokeRole: Type: AWS::IAM::Role Properties: AssumeRolePolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Principal: Service: events.amazonaws.com Action: sts:AssumeRole Policies: - PolicyName: AllowPipelineExecution PolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Action: codepipeline:StartPipelineExecution Resource: '*'
+
+EventBridge rule to detect .yaml or .json object upload to S3
+
+TemplateUploadEventRule: Type: AWS::Events::Rule Properties: Description: Trigger pipeline when .yaml or .json is uploaded EventPattern: source: - aws.s3 detail-type: - Object Created detail: bucket: name: - !Ref S3BucketName object: key: - suffix: .yaml - suffix: .json Targets: - Arn: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline} RoleArn: !GetAtt EventBridgeInvokeRole.Arn Id: CodePipelineTrigger InputTransformer: InputPathsMap: key: $.detail.object.key InputTemplate: '{"LatestTemplateKey":"<key>"}'
+
