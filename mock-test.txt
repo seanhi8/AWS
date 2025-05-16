@@ -20,6 +20,25 @@
 
 ### ✅ 第一步：部署 Mock S3 存储桶
 
+
+
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
+
+// 创建 Lambda 函数
+const fn = new lambda.Function(this, 'MyFunction', {
+  runtime: lambda.Runtime.NODEJS_18_X,
+  handler: 'handler.handler',
+  code: lambda.Code.fromAsset('lambda'),
+});
+
+// 手动创建对应的日志组，并设置保留时间
+new logs.LogGroup(this, 'MyFunctionLogGroup', {
+  logGroupName: `/aws/lambda/${fn.functionName}`, // 必须匹配 Lambda 默认的日志组命名
+  retention: logs.RetentionDays.SEVEN_DAYS,
+  removalPolicy: cdk.RemovalPolicy.DESTROY, // 可选：stack 删除时也删掉日志组
+});
+
 ```bash
 cd mock-s3-buckets
 npm install
