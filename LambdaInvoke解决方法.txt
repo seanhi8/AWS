@@ -1,0 +1,163 @@
+🧱 AWS CDK 中正确使用 LambdaInvoke 的完整示例与讲解（TypeScript）
+📌 目标
+我们使用 4 个 Lambda 函数来构建多个 Step Function 状态机，每个状态机串联调用这些 Lambda 函数，但顺序不同。并通过封装函数简化代码结构，避免 LambdaInvoke 重复使用报错的问题。
+
+🧠 关键原则
+类型	可否复用	说明
+lambda.Function	✅ 可复用	一个 Lambda 函数可用于多个状态机
+LambdaInvoke	❌ 不可复用	每次用必须 new 一个新的对象，不能被多个链复用
+
+📦 安装依赖（如尚未初始化 CDK）
+npx cdk init app --language=typescript
+npm install aws-cdk-lib constructs
+
+✅ 完整示例代码（含中文注释）
+import * as cdk from 'aws-cdk-lib';
+import { Construct } from 'constructs';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
+import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
+
+export class StepFunctionChainStack extends cdk.Stack {
+  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+    super(scope, id, props);
+
+    // ✅ 创建 4 个可复用的 Lambda 函数
+    const lambdaFn1 = this.createLambda('LambdaFn1');
+    const lambdaFn2 = this.createLambda('LambdaFn2');
+    const lambdaFn3 = this.createLambda('LambdaFn3');
+    const lambdaFn4 = this.createLambda('LambdaFn4');
+
+    // ✅ 状态机 1：1 → 2 → 3 → 4
+    const sm1 = this.createLambdaChain('SM1', [lambdaFn1, lambdaFn2, lambdaFn3, lambdaFn4]);
+    new sfn.StateMachine(this, 'StateMachineSM1', {
+      definition: sm1,
+      stateMachineType: sfn.StateMachineType.STANDARD,
+    });
+
+    // ✅ 状态机 2：2 → 1 → 3 → 4
+    const sm2 = this.createLambdaChain('SM2', [lambdaFn2, lambdaFn1, lambdaFn3, lambdaFn4]);
+    new sfn.StateMachine(this, 'StateMachineSM2', {
+      definition: sm2,
+      stateMachineType: sfn.StateMachineType.STANDARD,
+    });
+
+    // ✅ 状态机 3：3 → 2 → 1 → 4
+    const sm3 = this.createLambdaChain('SM3', [lambdaFn3, lambdaFn2, lambdaFn1, lambdaFn4]);
+    new sfn.StateMachine(this, 'StateMachineSM3', {
+      definition: sm3,
+      stateMachineType: sfn.StateMachineType.STANDARD,
+    });
+  }
+
+  /**
+   * ✅ 简化创建 Lambda 的工具函数
+   */
+  private createLambda(id: string): lambda.Function {
+    return new lambda.Function(this, id, {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromInline(`
+        exports.handler = async (event) => {
+          console.log("Hello from ${id}", event);
+          return { result: "${id} finished" };
+        };
+      `),
+    });
+  }
+
+  /**
+   * ✅ 构造 LambdaInvoke 的链式调用（每次都 new 新的 LambdaInvoke 实例）
+   */
+  private createLambdaChain(prefix: string, fns: lambda.IFunction[]): sfn.Chain {
+    const steps = fns.map((fn, index) => {
+      return new tasks.LambdaInvoke(this, `${prefix}_Lambda${index + 1}`, {
+        lambdaFunction: fn,                // ✅ 绑定 Lambda 函数
+        payloadResponseOnly: true,         // ✅ 仅返回 Payload，不含完整响应结构
+      });
+    });
+
+    const [first, ...rest] = steps;
+    return rest.reduce((chain, step) => chain.next(step), first);
+  }
+}
+
+⚠️ 常见错误与注意事项
+❌ 错误示例（会报错）
+const step1 = new LambdaInvoke(...);
+const sm1 = step1.next(...); // ✅ 使用了一次
+const sm2 = step1.next(...); // ❌ 再次使用同一个对象，报错！
+错误提示：
+StateMachine already contains state 'SM1_Lambda1'
+OR
+State is already used in another chain
+
+🛠 手动创建 LambdaInvoke 的方式（对比封装）
+const step1 = new tasks.LambdaInvoke(this, 'SM1_Lambda1', {
+  lambdaFunction: lambdaFn1,
+  payloadResponseOnly: true,
+});
+
+const step2 = new tasks.LambdaInvoke(this, 'SM1_Lambda2', {
+  lambdaFunction: lambdaFn2,
+  payloadResponseOnly: true,
+});
+
+const sm1 = step1.next(step2);
+
+📌 总结
+✅ 每个 Lambda 函数可以重复使用
+❌ 每个 LambdaInvoke 必须是全新的实例
+✅ 封装 createLambdaChain() 可以简化 .next().next() 写法
+✅ 使用 payloadResponseOnly: true 可以让输出更清爽
+
+----------------------------------------------------------------------------
+
+LambdaInvoke 是在 createLambdaChain() 这个函数里创建的
+
+private createLambdaChain(prefix: string, fns: lambda.IFunction[]): sfn.Chain {
+  const steps = fns.map((fn, index) => {
+    return new tasks.LambdaInvoke(this, `${prefix}_Lambda${index + 1}`, {
+      lambdaFunction: fn,                // ✅ 设置调用哪个 Lambda 函数
+      payloadResponseOnly: true,         // ✅ 等价于 outputPath: '$.Payload'
+    });
+  });
+
+  const [first, ...rest] = steps;
+  return rest.reduce((chain, step) => chain.next(step), first);
+}
+
+
+LambdaInvoke 的设定说明（中文详解）
+new tasks.LambdaInvoke(...) 构造函数传入了这些关键参数：
+| 参数                             | 示例                            | 说明                                                    |
+| ------------------------------ | ----------------------------- | ----------------------------------------------------- |
+| `this`                         | 当前 Construct                  | 表示 CDK 树中的作用域                                         |
+| `${prefix}_Lambda${index + 1}` | 比如 `SM1_Lambda1`              | 每个状态的唯一 ID，防止冲突                                       |
+| `lambdaFunction: fn`           | 比如 `lambdaFn1`                | 指定要调用的 Lambda 函数                                      |
+| `payloadResponseOnly: true`    | 相当于 `outputPath: "$.Payload"` | 只返回 `Lambda` 的返回值中的 Payload 部分，简化 Step Function 的输出结构 |
+
+替代写法（完全展开版，便于你单独看）
+如果你不使用 createLambdaChain() 封装函数，也可以这样手写每个 LambdaInvoke：
+const step1 = new tasks.LambdaInvoke(this, 'SM1_Lambda1', {
+  lambdaFunction: lambdaFn1,
+  payloadResponseOnly: true, // 只保留 Lambda 返回结果里的 Payload 字段
+});
+
+const step2 = new tasks.LambdaInvoke(this, 'SM1_Lambda2', {
+  lambdaFunction: lambdaFn2,
+  payloadResponseOnly: true,
+});
+
+const step3 = new tasks.LambdaInvoke(this, 'SM1_Lambda3', {
+  lambdaFunction: lambdaFn3,
+  payloadResponseOnly: true,
+});
+
+const step4 = new tasks.LambdaInvoke(this, 'SM1_Lambda4', {
+  lambdaFunction: lambdaFn4,
+  payloadResponseOnly: true,
+});
+
+const sm1_definition = step1.next(step2).next(step3).next(step4);
+
