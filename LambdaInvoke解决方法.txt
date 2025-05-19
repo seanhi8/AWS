@@ -152,6 +152,46 @@ const step2 = new tasks.LambdaInvoke(this, 'SM1_Lambda2', {
 const step3 = new tasks.LambdaInvoke(this, 'SM1_Lambda3', {
   lambdaFunction: lambdaFn3,
   payloadResponseOnly: true,
+
+
+
+// 第一个状态机使用的步骤
+const sm1_step1 = new sfn_tasks.LambdaInvoke(this, 'SM1_step1', {
+  lambdaFunction: bbbaa,
+  outputPath: '$.Payload',
+});
+const sm1_step2 = new sfn_tasks.LambdaInvoke(this, 'SM1_step2', {
+  lambdaFunction: bbbaa,
+  outputPath: '$.Payload',
+});
+const sm1_step3 = new sfn_tasks.LambdaInvoke(this, 'SM1_step3', {
+  lambdaFunction: bbbaa,
+  outputPath: '$.Payload',
+});
+const sm1_step4 = new sfn_tasks.LambdaInvoke(this, 'SM1_step4', {
+  lambdaFunction: bbbaa,
+  outputPath: '$.Payload',
+});
+const def1 = sm1_step1.next(sm1_step2).next(sm1_step3).next(sm1_step4);
+
+// 第二个状态机使用的步骤（名字不一样就行）
+const sm2_step1 = new sfn_tasks.LambdaInvoke(this, 'SM2_step1', {
+  lambdaFunction: bbbaa,
+  outputPath: '$.Payload',
+});
+const sm2_step2 = new sfn_tasks.LambdaInvoke(this, 'SM2_step2', {
+  lambdaFunction: bbbaa,
+  outputPath: '$.Payload',
+});
+const sm2_step3 = new sfn_tasks.LambdaInvoke(this, 'SM2_step3', {
+  lambdaFunction: bbbaa,
+  outputPath: '$.Payload',
+});
+const sm2_step4 = new sfn_tasks.LambdaInvoke(this, 'SM2_step4', {
+  lambdaFunction: bbbaa,
+  outputPath: '$.Payload',
+});
+const def2 = sm2_step1.next(sm2_step2).next(sm2_step4).next(sm2_step3);
 });
 
 const step4 = new tasks.LambdaInvoke(this, 'SM1_Lambda4', {
