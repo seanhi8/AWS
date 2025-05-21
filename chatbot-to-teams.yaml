@@ -1,0 +1,76 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Bind multiple SNS Topics to multiple Teams channels via AWS Chatbot
+
+Parameters:
+  TeamsChannelConfigs:
+    Type: CommaDelimitedList
+    Description: >
+      List of "ChannelId|TopicName" pairs.
+      Example: 1111:team/general|topic-dev,2222:team2/alerts|topic-prod
+
+Resources:
+
+  # ========== 第一个 SNS Topic 与 Teams 渠道绑定配置 ==========
+  
+  SNSTopic1:
+    Type: AWS::SNS::Topic
+    Properties:
+      # 获取参数中的第一个项，并按 | 分割，取第二段（TopicName）
+      TopicName: !Select [1, !Split ["|", !Select [0, !Ref TeamsChannelConfigs]]]
+
+  ChatbotRole1:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ChatbotAccessRole-${AWS::StackName}-1
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: chatbot.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/ReadOnlyAccess  # 可视需求进一步最小化权限
+
+  TeamsChatbotConfig1:
+    Type: AWS::Chatbot::MicrosoftTeamsChannelConfiguration
+    Properties:
+      ConfigurationName: !Sub ChatbotConfig-${AWS::StackName}-1
+      IamRoleArn: !GetAtt ChatbotRole1.Arn
+      # 取参数中的第一项并分割，拿第一段（Teams Channel ID）
+      MicrosoftTeamsChannelId: !Select [0, !Split ["|", !Select [0, !Ref TeamsChannelConfigs]]]
+      LoggingLevel: ERROR
+      SnsTopicArns:
+        - !Ref SNSTopic1
+
+
+  # ========== 第二个 SNS Topic 与 Teams 渠道绑定配置 ==========
+
+  SNSTopic2:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Select [1, !Split ["|", !Select [1, !Ref TeamsChannelConfigs]]]
+
+  ChatbotRole2:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ChatbotAccessRole-${AWS::StackName}-2
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: chatbot.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+
+  TeamsChatbotConfig2:
+    Type: AWS::Chatbot::MicrosoftTeamsChannelConfiguration
+    Properties:
+      ConfigurationName: !Sub ChatbotConfig-${AWS::StackName}-2
+      IamRoleArn: !GetAtt ChatbotRole2.Arn
+      MicrosoftTeamsChannelId: !Select [0, !Split ["|", !Select [1, !Ref TeamsChannelConfigs]]]
+      LoggingLevel: ERROR
+      SnsTopicArns:
+        - !Ref SNSTopic2
