@@ -1,29 +1,224 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CloudFormation pipeline for validating and deploying multiple templates
+  with approval by IAM group
 
----
-
-AWSTemplateFormatVersion: '2010-09-09' Description: > CloudFormation pipeline for validating and deploying multiple templates with approval by IAM group
-
-Parameters: TemplateBucketName: Type: String Default: cfn-validation-bucket ApprovalIamGroup: Type: String Default: GitApproval PipelineRegion: Type: String Default: ap-northeast-1
+Parameters:
+  TemplateBucketName:
+    Type: String
+    Default: cfn-validation-bucket
+  ApprovalIamGroup:
+    Type: String
+    Default: GitApproval
+  PipelineRegion:
+    Type: String
+    Default: ap-northeast-1
 
 Resources:
+  TemplateBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref TemplateBucketName
+      LifecycleConfiguration:
+        Rules:
+          - Status: Enabled
+            ExpirationInDays: 30
+            Prefix: ''
+            Id: ExpireOldFiles
 
-TemplateBucket: Type: AWS::S3::Bucket Properties: BucketName: !Ref TemplateBucketName LifecycleConfiguration: Rules: - Status: Enabled ExpirationInDays: 30 Prefix: '' Id: ExpireOldFiles
+  TemplateBucketNotification:
+    Type: AWS::S3::BucketNotification
+    Properties:
+      Bucket: !Ref TemplateBucket
+      LambdaConfigurations:
+        - Event: s3:ObjectCreated:*
+          Filter:
+            S3Key:
+              Rules:
+                - Name: suffix
+                  Value: .yaml
+          Function: !GetAtt BuildTriggerFunction.Arn
+        - Event: s3:ObjectCreated:*
+          Filter:
+            S3Key:
+              Rules:
+                - Name: suffix
+                  Value: .json
+          Function: !GetAtt BuildTriggerFunction.Arn
 
-TemplateBucketNotification: Type: AWS::S3::BucketNotification Properties: Bucket: !Ref TemplateBucket LambdaConfigurations: - Event: s3:ObjectCreated:* Filter: S3Key: Rules: - Name: suffix Value: .yaml Function: !GetAtt BuildTriggerFunction.Arn - Event: s3:ObjectCreated:* Filter: S3Key: Rules: - Name: suffix Value: .json Function: !GetAtt BuildTriggerFunction.Arn
+  BuildTriggerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: TriggerTemplateValidation
+      Handler: index.handler
+      Runtime: python3.12
+      Timeout: 30
+      MemorySize: 128
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3, os
+          def handler(event, context):
+              s3 = boto3.client('s3')
+              for record in event['Records']:
+                  key = record['s3']['object']['key']
+                  if key.endswith(('.yaml', '.yml', '.json')):
+                      cb = boto3.client('codebuild')
+                      cb.start_build(
+                          projectName=os.environ['PROJECT_NAME'],
+                          environmentVariablesOverride=[
+                              {"name": "TEMPLATE_KEY", "value": key, "type": "PLAINTEXT"},
+                              {"name": "BUCKET_NAME", "value": record['s3']['bucket']['name'], "type": "PLAINTEXT"}
+                          ]
+                      )
+      Environment:
+        Variables:
+          PROJECT_NAME: cfn-lint-project
 
-BuildTriggerFunction: Type: AWS::Lambda::Function Properties: FunctionName: TriggerTemplateValidation Handler: index.handler Runtime: python3.12 Timeout: 30 MemorySize: 128 Role: !GetAtt LambdaExecutionRole.Arn Code: ZipFile: | import boto3, os def handler(event, context): s3 = boto3.client('s3') for record in event['Records']: key = record['s3']['object']['key'] if key.endswith(('.yaml', '.yml', '.json')): cb = boto3.client('codebuild') cb.start_build(projectName=os.environ['PROJECT_NAME'], environmentVariablesOverride=[ {"name": "TEMPLATE_KEY", "value": key, "type": "PLAINTEXT"}, {"name": "BUCKET_NAME", "value": record['s3']['bucket']['name'], "type": "PLAINTEXT"} ]) Environment: Variables: PROJECT_NAME: cfn-lint-project
+  ValidationTriggerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ValidationResultHandler
+      Handler: index.handler
+      Runtime: python3.12
+      Timeout: 30
+      MemorySize: 128
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3, os
+          def handler(event, context):
+              s3 = boto3.client('s3')
+              cp = boto3.client('codepipeline')
+              for record in event['Records']:
+                  key = record['s3']['object']['key']
+                  if key.endswith('.result.log'):
+                      result = s3.get_object(Bucket=record['s3']['bucket']['name'], Key=key)['Body'].read().decode()
+                      if result.strip().endswith('SUCCESS'):
+                          stack_name = os.path.basename(key).split('.')[0]
+                          cp.start_pipeline_execution(name=f'Pipeline-{stack_name}')
 
-ValidationTriggerFunction: Type: AWS::Lambda::Function Properties: FunctionName: ValidationResultHandler Handler: index.handler Runtime: python3.12 Timeout: 30 MemorySize: 128 Role: !GetAtt LambdaExecutionRole.Arn Code: ZipFile: | import boto3, os def handler(event, context): s3 = boto3.client('s3') cp = boto3.client('codepipeline') for record in event['Records']: key = record['s3']['object']['key'] if key.endswith('.result.log'): result = s3.get_object(Bucket=record['s3']['bucket']['name'], Key=key)['Body'].read().decode() if result.strip().endswith('SUCCESS'): stack_name = os.path.basename(key).split('.')[0] cp.start_pipeline_execution(name=f'Pipeline-{stack_name}')
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaS3CBPipelinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - logs:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub '${TemplateBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codepipeline:StartPipelineExecution
+                Resource: '*'
 
-LambdaExecutionRole: Type: AWS::IAM::Role Properties: AssumeRolePolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Principal: Service: lambda.amazonaws.com Action: sts:AssumeRole Policies: - PolicyName: LambdaS3CBPipelinePolicy PolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Action: - logs:* Resource: '' - Effect: Allow Action: - s3:GetObject - s3:PutObject Resource: !Sub '${TemplateBucket.Arn}/' - Effect: Allow Action: - codebuild:StartBuild - codepipeline:StartPipelineExecution Resource: '*'
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: cfn-lint-project
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: TEMPLATE_KEY
+            Value: dummy
+          - Name: BUCKET_NAME
+            Value: dummy
+      Source:
+        Type: NO_SOURCE
+      BuildSpec: |
+        version: 0.2
+        phases:
+          install:
+            commands:
+              - pip install cfn-lint
+          build:
+            commands:
+              - aws s3 cp s3://$BUCKET_NAME/$TEMPLATE_KEY template.tmp
+              - cfn-lint template.tmp > result.log || echo 'FAILED' >> result.log
+              - echo SUCCESS >> result.log
+              - aws s3 cp result.log s3://$BUCKET_NAME/${TEMPLATE_KEY}.result.log
+      Artifacts:
+        Type: NO_ARTIFACTS
 
-CodeBuildProject: Type: AWS::CodeBuild::Project Properties: Name: cfn-lint-project ServiceRole: !GetAtt CodeBuildRole.Arn Environment: ComputeType: BUILD_GENERAL1_SMALL Image: aws/codebuild/standard:7.0 Type: LINUX_CONTAINER EnvironmentVariables: - Name: TEMPLATE_KEY Value: dummy - Name: BUCKET_NAME Value: dummy Source: Type: NO_SOURCE BuildSpec: | version: 0.2 phases: install: commands: - pip install cfn-lint build: commands: - aws s3 cp s3://$BUCKET_NAME/$TEMPLATE_KEY template.tmp - cfn-lint template.tmp > result.log || echo 'FAILED' >> result.log - echo SUCCESS >> result.log - aws s3 cp result.log s3://$BUCKET_NAME/${TEMPLATE_KEY}.result.log Artifacts: Type: NO_ARTIFACTS
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildS3Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub '${TemplateBucket.Arn}/*'
 
-CodeBuildRole: Type: AWS::IAM::Role Properties: AssumeRolePolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Principal: Service: codebuild.amazonaws.com Action: sts:AssumeRole Policies: - PolicyName: CodeBuildS3Policy PolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Action: - s3:GetObject - s3:PutObject Resource: !Sub '${TemplateBucket.Arn}/*'
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                  - cloudformation:*
+                  - iam:PassRole
+                Resource: '*'
 
-CodePipelineRole: Type: AWS::IAM::Role Properties: AssumeRolePolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Principal: Service: codepipeline.amazonaws.com Action: sts:AssumeRole Policies: - PolicyName: CodePipelinePolicy PolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Action: - s3:* - cloudformation:* - iam:PassRole Resource: '*'
+  ApprovalRule:
+    Type: AWS::CodePipeline::CustomActionType
+    Properties:
+      Category: Approval
+      Provider: Manual
+      Version: 1
+      Settings:
+        EntityUrlTemplate: https://console.aws.amazon.com/iam/home#/groups/${ApprovalIamGroup}
+      ConfigurationProperties: []
+      InputArtifactDetails:
+        MinimumCount: 0
+        MaximumCount: 0
+      OutputArtifactDetails:
+        MinimumCount: 0
+        MaximumCount: 0
 
-ApprovalRule: Type: AWS::CodePipeline::CustomActionType Properties: Category: Approval Provider: Manual Version: 1 Settings: EntityUrlTemplate: https://console.aws.amazon.com/iam/home#/groups/${ApprovalIamGroup} ConfigurationProperties: [] InputArtifactDetails: MinimumCount: 0 MaximumCount: 0 OutputArtifactDetails: MinimumCount: 0 MaximumCount: 0
-
-Outputs: TemplateBucket: Value: !Ref TemplateBucket Description: 'S3 Bucket for uploading CloudFormation templates'
-
+Outputs:
+  TemplateBucket:
+    Value: !Ref TemplateBucket
+    Description: 'S3 Bucket for uploading CloudFormation templates'
