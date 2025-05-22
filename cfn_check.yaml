@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 自动校验上传到 S3 的 CloudFormation 模板，并保留日志 30 天
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: cfn-template-validation-bucket
+    Description: 存储 CloudFormation 模板的 S3 桶名称
+
+Resources:
+  TemplateBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .yaml
+            LambdaFunctionArn: !GetAtt ValidateTemplateFunction.Arn
+          - Event: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .json
+            LambdaFunctionArn: !GetAtt ValidateTemplateFunction.Arn
+      LifecycleConfiguration:
+        Rules:
+          - Id: AutoDeleteAfter30Days
+            Status: Enabled
+            ExpirationInDays: 30
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ValidateTemplateLambdaRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3AndCFNAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub arn:aws:s3:::${BucketName}/*
+              - Effect: Allow
+                Action:
+                  - cloudformation:ValidateTemplate
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  ValidateTemplateFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ValidateCloudFormationTemplate
+      Runtime: python3.11
+      Handler: index.handler
+      Timeout: 30
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import urllib.parse
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          s3 = boto3.client('s3')
+          cfn = boto3.client('cloudformation')
+
+          def handler(event, context):
+              for record in event['Records']:
+                  bucket = record['s3']['bucket']['name']
+                  key = urllib.parse.unquote_plus(record['s3']['object']['key'])
+
+                  if not key.endswith(('.yaml', '.json')):
+                      logger.info(f"跳过非模板文件：{key}")
+                      continue
+
+                  try:
+                      response = s3.get_object(Bucket=bucket, Key=key)
+                      content = response['Body'].read().decode('utf-8')
+
+                      cfn.validate_template(TemplateBody=content)
+                      logger.info(f"模板校验成功：{key}")
+                  except Exception as e:
+                      logger.error(f"模板校验失败：{key}\n原因：{e}")
+
+  # 日志组设置保留时间为 30 天
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ValidateTemplateFunction}
+      RetentionInDays: 30
+
+  S3InvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ValidateTemplateFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub arn:aws:s3:::${BucketName}
