@@ -1,119 +1,44 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: 自动校验上传到 S3 的 CloudFormation 模板，并保留日志 30 天
+AWSTemplateFormatVersion: '2010-09-09' Description: Automatically validate CloudFormation templates using cfn-lint via CodeBuild triggered by Lambda on S3 upload.
 
-Parameters:
-  BucketName:
-    Type: String
-    Default: cfn-template-validation-bucket
-    Description: 存储 CloudFormation 模板的 S3 桶名称
+Parameters: TemplateBucketName: Type: String Default: cfn-validation-templates Description: S3 bucket name to store uploaded CloudFormation templates
 
-Resources:
-  TemplateBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Ref BucketName
-      NotificationConfiguration:
-        LambdaConfigurations:
-          - Event: s3:ObjectCreated:*
-            Filter:
-              S3Key:
-                Rules:
-                  - Name: suffix
-                    Value: .yaml
-            LambdaFunctionArn: !GetAtt ValidateTemplateFunction.Arn
-          - Event: s3:ObjectCreated:*
-            Filter:
-              S3Key:
-                Rules:
-                  - Name: suffix
-                    Value: .json
-            LambdaFunctionArn: !GetAtt ValidateTemplateFunction.Arn
-      LifecycleConfiguration:
-        Rules:
-          - Id: AutoDeleteAfter30Days
-            Status: Enabled
-            ExpirationInDays: 30
+Resources: TemplateBucket: Type: AWS::S3::Bucket Properties: BucketName: !Ref TemplateBucketName LifecycleConfiguration: Rules: - Id: DeleteAfter30Days Status: Enabled ExpirationInDays: 30
 
-  LambdaExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: ValidateTemplateLambdaRole
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: S3AndCFNAccess
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - s3:GetObject
-                Resource: !Sub arn:aws:s3:::${BucketName}/*
-              - Effect: Allow
-                Action:
-                  - cloudformation:ValidateTemplate
-                Resource: "*"
-              - Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: "*"
+TemplateBucketPolicy: Type: AWS::S3::BucketPolicy Properties: Bucket: !Ref TemplateBucket PolicyDocument: Statement: - Effect: Allow Principal: '' Action: - s3:GetObject - s3:PutObject Resource: !Sub "arn:aws:s3:::${TemplateBucket}/"
 
-  ValidateTemplateFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: ValidateCloudFormationTemplate
-      Runtime: python3.11
-      Handler: index.handler
-      Timeout: 30
-      Role: !GetAtt LambdaExecutionRole.Arn
-      Code:
-        ZipFile: |
-          import boto3
-          import urllib.parse
-          import logging
+LambdaExecutionRole: Type: AWS::IAM::Role Properties: RoleName: LambdaCFNTriggerRole AssumeRolePolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Principal: Service: lambda.amazonaws.com Action: sts:AssumeRole Policies: - PolicyName: AllowS3AndCodeBuild PolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Action: - s3:GetObject Resource: !Sub arn:aws:s3:::${TemplateBucket}/* - Effect: Allow Action: - codebuild:StartBuild Resource: '' - Effect: Allow Action: - logs:CreateLogGroup - logs:CreateLogStream - logs:PutLogEvents Resource: ''
 
-          logger = logging.getLogger()
-          logger.setLevel(logging.INFO)
+LambdaFunction: Type: AWS::Lambda::Function Properties: FunctionName: TriggerCFNValidationBuild Runtime: python3.11 Handler: index.handler Role: !GetAtt LambdaExecutionRole.Arn Timeout: 30 Code: ZipFile: | import boto3 import json import urllib.parse
 
-          s3 = boto3.client('s3')
-          cfn = boto3.client('cloudformation')
+def handler(event, context):
+          codebuild = boto3.client('codebuild')
+          for record in event['Records']:
+              bucket = record['s3']['bucket']['name']
+              key = urllib.parse.unquote_plus(record['s3']['object']['key'])
+              if not key.endswith(('.yaml', '.yml', '.json')):
+                  continue
+              codebuild.start_build(
+                  projectName='CFNValidationJob',
+                  environmentVariablesOverride=[
+                      {
+                          'name': 'S3_TEMPLATE_KEY',
+                          'value': key,
+                          'type': 'PLAINTEXT'
+                      },
+                      {
+                          'name': 'S3_TEMPLATE_BUCKET',
+                          'value': bucket,
+                          'type': 'PLAINTEXT'
+                      }
+                  ]
+              )
 
-          def handler(event, context):
-              for record in event['Records']:
-                  bucket = record['s3']['bucket']['name']
-                  key = urllib.parse.unquote_plus(record['s3']['object']['key'])
+LambdaS3Notification: Type: AWS::S3::BucketNotification Properties: Bucket: !Ref TemplateBucket NotificationConfiguration: LambdaConfigurations: - Event: s3:ObjectCreated:* Function: !GetAtt LambdaFunction.Arn
 
-                  if not key.endswith(('.yaml', '.json')):
-                      logger.info(f"跳过非模板文件：{key}")
-                      continue
+PermissionForS3Invoke: Type: AWS::Lambda::Permission Properties: FunctionName: !Ref LambdaFunction Action: lambda:InvokeFunction Principal: s3.amazonaws.com SourceArn: !Sub arn:aws:s3:::${TemplateBucket}
 
-                  try:
-                      response = s3.get_object(Bucket=bucket, Key=key)
-                      content = response['Body'].read().decode('utf-8')
+CodeBuildServiceRole: Type: AWS::IAM::Role Properties: RoleName: CodeBuildCFNValidationRole AssumeRolePolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Principal: Service: codebuild.amazonaws.com Action: sts:AssumeRole Policies: - PolicyName: S3AndLogsAccess PolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Action: - s3:GetObject - s3:PutObject Resource: !Sub arn:aws:s3:::${TemplateBucket}/* - Effect: Allow Action: - logs:CreateLogGroup - logs:CreateLogStream - logs:PutLogEvents Resource: '*'
 
-                      cfn.validate_template(TemplateBody=content)
-                      logger.info(f"模板校验成功：{key}")
-                  except Exception as e:
-                      logger.error(f"模板校验失败：{key}\n原因：{e}")
+CFNValidationJob: Type: AWS::CodeBuild::Project Properties: Name: CFNValidationJob Source: Type: NO_SOURCE BuildSpec: | version: 0.2 env: variables: RESULT_FILE: validation-results/output.log phases: install: runtime-versions: python: 3.11 commands: - pip install cfn-lint build: commands: - mkdir -p validation-results - echo "Validating: s3://$S3_TEMPLATE_BUCKET/$S3_TEMPLATE_KEY" > $RESULT_FILE - aws s3 cp s3://$S3_TEMPLATE_BUCKET/$S3_TEMPLATE_KEY template.yaml - | if cfn-lint template.yaml > lint_output.txt 2>&1; then echo "SUCCESS" >> $RESULT_FILE else echo "FAILED" >> $RESULT_FILE cat lint_output.txt >> $RESULT_FILE fi - aws s3 cp $RESULT_FILE s3://$S3_TEMPLATE_BUCKET/$S3_TEMPLATE_KEY.result.log Environment: ComputeType: BUILD_GENERAL1_SMALL Image: aws/codebuild/standard:7.0 Type: LINUX_CONTAINER EnvironmentVariables: - Name: S3_TEMPLATE_KEY Value: "" - Name: S3_TEMPLATE_BUCKET Value: "" ServiceRole: !GetAtt CodeBuildServiceRole.Arn TimeoutInMinutes: 5 LogsConfig: CloudWatchLogs: Status: ENABLED GroupName: /aws/codebuild/CFNValidationJob StreamName: default
 
-  # 日志组设置保留时间为 30 天
-  LambdaLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: !Sub /aws/lambda/${ValidateTemplateFunction}
-      RetentionInDays: 30
-
-  S3InvokePermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref ValidateTemplateFunction
-      Action: lambda:InvokeFunction
-      Principal: s3.amazonaws.com
-      SourceArn: !Sub arn:aws:s3:::${BucketName}
+LogGroup: Type: AWS::Logs::LogGroup Properties: LogGroupName: /aws/codebuild/CFNValidationJob RetentionInDays: 30
