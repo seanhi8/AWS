@@ -10,15 +10,17 @@ DefinitionString:
             "StateMachineArn": "${Step1StateMachineArn}",
             "Input": {}
           },
+          "ResultPath": "$.StartStep1Async",
           "Next": "InitPollingVars"
         },
         "InitPollingVars": {
           "Type": "Pass",
-          "Result": {
-            "count": 0,
-            "streak": 0
+          "Parameters": {
+            "Vars": {
+              "count": 0,
+              "streak": 0
+            }
           },
-          "ResultPath": "$.vars",
           "Next": "CheckS3_001"
         },
         "CheckS3_001": {
@@ -47,31 +49,11 @@ DefinitionString:
         "IncStreak": {
           "Type": "Pass",
           "Parameters": {
-            "vars.count.$": "$.vars.count",
-            "vars.streak.$": "States.MathAdd($.vars.streak, 1)",
-            "vars.countNext.$": "States.MathAdd($.vars.count, 1)"
-          },
-          "ResultPath": "$.vars",
-          "Next": "LogVarsStep"
-        },
-        "ResetStreak": {
-          "Type": "Pass",
-          "Parameters": {
-            "vars.count.$": "$.vars.count",
-            "vars.streak": 0,
-            "vars.countNext.$": "States.MathAdd($.vars.count, 1)"
-          },
-          "ResultPath": "$.vars",
-          "Next": "LogVarsStep"
-        },
-        "LogVarsStep": {
-          "Type": "Pass",
-          "ResultPath": "$.logVars",
-          "Parameters": {
-            "streak.$": "$.vars.streak",
             "count.$": "$.vars.count",
-            "countNext.$": "$.vars.countNext"
+            "streak.$": "States.MathAdd($.vars.streak, 1)",
+            "countNext.$": "States.MathAdd($.vars.count, 1)"
           },
+          "ResultPath": "$.vars",
           "Next": "CheckEnd"
         },
         "CheckEnd": {
