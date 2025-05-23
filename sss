@@ -47,9 +47,11 @@ DefinitionString:
         "IncStreak": {
           "Type": "Pass",
           "Parameters": {
-            "vars.count.$": "$.vars.count",
-            "vars.streak.$": "States.MathAdd($.vars.streak, 1)",
-            "vars.countNext.$": "States.MathAdd($.vars.count, 1)"
+            "vars": {
+              "count.$": "$.vars.count",
+              "streak.$": "States.MathAdd($.vars.streak, 1)",
+              "countNext.$": "States.MathAdd($.vars.count, 1)"
+            }
           },
           "ResultPath": "$.vars",
           "Next": "CheckEnd"
@@ -57,9 +59,11 @@ DefinitionString:
         "ResetStreak": {
           "Type": "Pass",
           "Parameters": {
-            "vars.count.$": "$.vars.count",
-            "vars.streak": 0,
-            "vars.countNext.$": "States.MathAdd($.vars.count, 1)"
+            "vars": {
+              "count.$": "$.vars.count",
+              "streak": 0,
+              "countNext.$": "States.MathAdd($.vars.count, 1)"
+            }
           },
           "ResultPath": "$.vars",
           "Next": "CheckEnd"
