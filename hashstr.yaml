@@ -1,0 +1,161 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Deploy a Python 3.12 Lambda function to scan a DynamoDB table,
+  filter data by 'hashstr' and 'type' fields, count duplicates and uniques,
+  then write the results to S3.
+
+Parameters:
+  TableName:
+    Type: String
+    Description: DynamoDB table name
+  TargetHash:
+    Type: String
+    Description: Target hash value for filtering
+  TargetType:
+    Type: String
+    Description: Target type value for filtering
+  BucketName:
+    Type: String
+    Description: S3 bucket name for result storage
+  S3Prefix:
+    Type: String
+    Description: S3 key prefix for result files
+    Default: results/
+
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: LambdaDynamoDBS3RoleInline
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaDynamoDBS3PolicyInline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub arn:aws:s3:::${BucketName}/*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+  MyInlineLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: DynamoDBScanFilterWriteS3
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TableName
+          TARGET_HASH: !Ref TargetHash
+          TARGET_TYPE: !Ref TargetType
+          BUCKET_NAME: !Ref BucketName
+          S3_PREFIX: !Ref S3Prefix
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import json
+          import time
+          from collections import Counter
+
+          # Initialize AWS clients
+          dynamodb = boto3.resource('dynamodb')
+          s3 = boto3.client('s3')
+
+          # Read environment variables
+          TABLE_NAME = os.environ['TABLE_NAME']
+          TARGET_HASH = os.environ['TARGET_HASH']
+          TARGET_TYPE = os.environ['TARGET_TYPE']
+          BUCKET_NAME = os.environ['BUCKET_NAME']
+          S3_PREFIX = os.environ.get('S3_PREFIX', 'results/')
+
+          # Fixed attribute names in DynamoDB items
+          HASH_KEY = 'hashstr'
+          TYPE_KEY = 'type'
+
+          table = dynamodb.Table(TABLE_NAME)
+
+          def lambda_handler(event, context):
+              try:
+                  all_items = []
+
+                  # Step 1: Scan the entire DynamoDB table (suitable for small tables)
+                  response = table.scan()
+                  items = response.get('Items', [])
+
+                  # Step 2: Filter items by target hashstr and type
+                  for item in items:
+                      if item.get(HASH_KEY) == TARGET_HASH and item.get(TYPE_KEY) == TARGET_TYPE:
+                          all_items.append(item)
+
+                  # Step 3: Count frequency of 'id' field occurrences
+                  id_counts = Counter(item['id'] for item in all_items if 'id' in item)
+
+                  # Step 4: Separate duplicates and unique items
+                  duplicates = [item for item in all_items if id_counts[item['id']] >= 2]
+                  uniques = [item for item in all_items if id_counts[item['id']] == 1]
+
+                  # Step 5: Create timestamp string
+                  timestamp = time.strftime('%Y%m%d%H%M%S')
+
+                  # Step 6: Write duplicates to S3 as JSON
+                  if duplicates:
+                      dup_key = f"{S3_PREFIX}repeat_{timestamp}.json"
+                      s3.put_object(
+                          Bucket=BUCKET_NAME,
+                          Key=dup_key,
+                          Body=json.dumps(duplicates, indent=2),
+                          ContentType='application/json'
+                      )
+
+                  # Step 7: Write unique items to S3 as JSON
+                  if uniques:
+                      uniq_key = f"{S3_PREFIX}unique_{timestamp}.json"
+                      s3.put_object(
+                          Bucket=BUCKET_NAME,
+                          Key=uniq_key,
+                          Body=json.dumps(uniques, indent=2),
+                          ContentType='application/json'
+                      )
+
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'duplicates': len(duplicates),
+                          'uniques': len(uniques),
+                          'message': 'Data uploaded to S3.'
+                      })
+                  }
+
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': f"Error: {str(e)}"
+                  }
+
+Outputs:
+  LambdaFunctionArn:
+    Description: ARN of the deployed Lambda function
+    Value: !GetAtt MyInlineLambdaFunction.Arn
