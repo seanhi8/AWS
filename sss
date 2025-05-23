@@ -47,25 +47,31 @@ DefinitionString:
         "IncStreak": {
           "Type": "Pass",
           "Parameters": {
-            "vars": {
-              "count.$": "$.vars.count",
-              "streak.$": "States.MathAdd($.vars.streak, 1)",
-              "countNext.$": "States.MathAdd($.vars.count, 1)"
-            }
+            "vars.count.$": "$.vars.count",
+            "vars.streak.$": "States.MathAdd($.vars.streak, 1)",
+            "vars.countNext.$": "States.MathAdd($.vars.count, 1)"
           },
           "ResultPath": "$.vars",
-          "Next": "CheckEnd"
+          "Next": "LogVarsStep"
         },
         "ResetStreak": {
           "Type": "Pass",
           "Parameters": {
-            "vars": {
-              "count.$": "$.vars.count",
-              "streak": 0,
-              "countNext.$": "States.MathAdd($.vars.count, 1)"
-            }
+            "vars.count.$": "$.vars.count",
+            "vars.streak": 0,
+            "vars.countNext.$": "States.MathAdd($.vars.count, 1)"
           },
           "ResultPath": "$.vars",
+          "Next": "LogVarsStep"
+        },
+        "LogVarsStep": {
+          "Type": "Pass",
+          "ResultPath": "$.logVars",
+          "Parameters": {
+            "streak.$": "$.vars.streak",
+            "count.$": "$.vars.count",
+            "countNext.$": "$.vars.countNext"
+          },
           "Next": "CheckEnd"
         },
         "CheckEnd": {
@@ -183,29 +189,3 @@ DefinitionString:
         }
       }
     }
-"CheckEnd": {
-  "Type": "Choice",
-  "Choices": [
-    {
-      "Variable": "$.vars.streak",
-      "NumericGreaterThanEquals": 5,
-      "Next": "StartStep2"
-    },
-    {
-      "Variable": "$.vars.countNext",
-      "NumericLessThan": 60,
-      "Next": "Wait1Minute"
-    }
-  ],
-  "Default": "FailWithLog"
-},
-"LogVarsStep": {
-  "Type": "Pass",
-  "ResultPath": "$.logVars",
-  "Parameters": {
-    "streak.$": "$.vars.streak",
-    "count.$": "$.vars.count",
-    "countNext.$": "$.vars.countNext"
-  },
-  "Next": "CheckEnd"
-}
