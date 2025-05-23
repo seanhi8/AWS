@@ -16,7 +16,7 @@ DefinitionString:
         "InitPollingVars": {
           "Type": "Pass",
           "Parameters": {
-            "Vars": {
+            "vars": {
               "count": 0,
               "streak": 0
             }
@@ -55,6 +55,15 @@ DefinitionString:
           },
           "ResultPath": "$.vars",
           "Next": "CheckEnd"
+        "ResetStreak": {
+          "Type": "Pass",
+          "Parameters": {
+            "count.$": "$.vars.count",
+            "streak": 0,
+            "countNext.$": "States.MathAdd($.vars.count, 1)"
+          },
+          "ResultPath": "$.vars",
+          "Next": "CheckEnd" 
         },
         "CheckEnd": {
           "Type": "Choice",
