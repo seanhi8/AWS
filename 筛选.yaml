@@ -1,80 +1,139 @@
-AWSTemplateFormatVersion: '2010-09-09' Description: Lambda to process large JSON files in S3, filter content into CSVs, and move to target bucket
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Lambda 处理 S3 中 JSON 文件，按条件筛选并输出结果为 JSON
 
-Parameters: SourceBucket: Type: String Description: Source S3 bucket name TargetBucket: Type: String Description: Target S3 bucket name to save processed files ConditionA: Type: String Description: Filter condition A (substring match) ConditionB: Type: String Description: Filter condition B (substring match)
+Parameters:
+  SourceBucket:
+    Type: String
+    Description: 原始 JSON 文件所在的 S3 桶名称
+  TargetBucket:
+    Type: String
+    Description: 用于保存筛选结果的 S3 桶名称
+  ConditionA:
+    Type: String
+    Description: 条件 A（包含关键词）
+  ConditionB:
+    Type: String
+    Description: 条件 B（包含关键词）
 
-Resources: LambdaExecutionRole: Type: AWS::IAM::Role Properties: RoleName: json-filter-lambda-role AssumeRolePolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Principal: Service: lambda.amazonaws.com Action: sts:AssumeRole ManagedPolicyArns: - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole Policies: - PolicyName: LambdaS3Access PolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Action: - s3:GetObject - s3:DeleteObject - s3:ListBucket - s3:PutObject Resource: - !Sub arn:aws:s3:::${SourceBucket} - !Sub arn:aws:s3:::${SourceBucket}/* - !Sub arn:aws:s3:::${TargetBucket} - !Sub arn:aws:s3:::${TargetBucket}/*
+Resources:
 
-LambdaFunction: Type: AWS::Lambda::Function Properties: FunctionName: json-filter-handler Runtime: python3.12 Timeout: 300 MemorySize: 1024 Role: !GetAtt LambdaExecutionRole.Arn Handler: index.handler Code: ZipFile: | import boto3 import os import csv import json import io import logging
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: json-filter-lambda-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LambdaS3Access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub arn:aws:s3:::${SourceBucket}
+                  - !Sub arn:aws:s3:::${SourceBucket}/*
+                  - !Sub arn:aws:s3:::${TargetBucket}
+                  - !Sub arn:aws:s3:::${TargetBucket}/*
 
-logger = logging.getLogger()
-      logger.setLevel(logging.INFO)
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/JsonFilterFunction
+      RetentionInDays: 90
 
-      s3 = boto3.client('s3')
+  JsonFilterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: JsonFilterFunction
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          SOURCE_BUCKET: !Ref SourceBucket
+          TARGET_BUCKET: !Ref TargetBucket
+          CONDITION_A: !Ref ConditionA
+          CONDITION_B: !Ref ConditionB
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import logging
+          import json
 
-      def handler(event, context):
-          source_bucket = os.environ['SOURCE_BUCKET']
-          target_bucket = os.environ['TARGET_BUCKET']
-          condition_a = os.environ['CONDITION_A']
-          condition_b = os.environ['CONDITION_B']
+          s3 = boto3.client('s3')
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
 
-          a_rows, b_rows, other_rows = [], [], []
+          def handler(event, context):
+              source_bucket = os.environ['SOURCE_BUCKET']
+              target_bucket = os.environ['TARGET_BUCKET']
+              condition_a = os.environ['CONDITION_A']
+              condition_b = os.environ['CONDITION_B']
 
-          response = s3.list_objects_v2(Bucket=source_bucket)
-          for obj in response.get('Contents', []):
-              key = obj['Key']
-              if key.endswith('/'):
-                  continue
-              logger.info(f"Processing file: {key}")
+              a_items, b_items, other_items = [], [], []
 
-              file_obj = s3.get_object(Bucket=source_bucket, Key=key)
-              stream = file_obj['Body']
-              buffer = b""
-              for chunk in stream.iter_chunks(chunk_size=4096):
-                  buffer += chunk
-              try:
-                  text = buffer.decode('utf-8').strip()
-                  if text.startswith('[') and text.endswith(']'):
-                      text = text[1:-1].strip()
-                      items = text.split(',')
+              response = s3.list_objects_v2(Bucket=source_bucket)
+              for obj in response.get('Contents', []):
+                  key = obj['Key']
+                  if key.endswith('/'):
+                      continue
+
+                  logger.info(f"Processing {key} from {source_bucket}")
+                  file_obj = s3.get_object(Bucket=source_bucket, Key=key)
+                  stream = file_obj['Body']
+
+                  buffer = b""
+                  for chunk in stream.iter_chunks(chunk_size=4096):
+                      buffer += chunk
+
+                  try:
+                      items = json.loads(buffer.decode('utf-8'))
                       for item in items:
-                          item = item.strip().strip('"')
+                          if not isinstance(item, str):
+                              continue
                           if condition_a in item:
-                              a_rows.append([item])
+                              a_items.append(item)
                           elif condition_b in item:
-                              b_rows.append([item])
+                              b_items.append(item)
                           else:
-                              other_rows.append([item])
-                  else:
-                      raise Exception("Invalid JSON array")
-              except Exception as e:
-                  logger.error(f"Error parsing file {key}: {str(e)}")
+                              other_items.append(item)
+                  except Exception as e:
+                      logger.error(f"Failed to process {key}: {str(e)}")
 
-          def upload_csv(rows, name):
-              if not rows:
-                  return
-              csv_buffer = io.StringIO()
-              writer = csv.writer(csv_buffer)
-              writer.writerows(rows)
-              s3.put_object(Bucket=target_bucket, Key=name, Body=csv_buffer.getvalue())
-              logger.info(f"Uploaded {name} to {target_bucket}")
+              def upload_json(items, name):
+                  if not items:
+                      return
+                  body = json.dumps(items, indent=2)
+                  s3.put_object(Bucket=target_bucket, Key=name, Body=body)
+                  logger.info(f"Uploaded {name} to {target_bucket}")
 
-          upload_csv(a_rows, '1111.csv')
-          upload_csv(b_rows, '2222.csv')
-          upload_csv(other_rows, '3333.csv')
+              upload_json(a_items, '1111.json')
+              upload_json(b_items, '2222.json')
+              upload_json(other_items, '3333.json')
 
-          for obj in response.get('Contents', []):
-              key = obj['Key']
-              if key.endswith('/'):
-                  continue
-              s3.delete_object(Bucket=source_bucket, Key=key)
-              logger.info(f"Deleted {key} from source bucket")
+              for obj in response.get('Contents', []):
+                  key = obj['Key']
+                  if key.endswith('/'):
+                      continue
+                  s3.delete_object(Bucket=source_bucket, Key=key)
+                  logger.info(f"Deleted {key} from source bucket")
 
-  Environment:
-    Variables:
-      SOURCE_BUCKET: !Ref SourceBucket
-      TARGET_BUCKET: !Ref TargetBucket
-      CONDITION_A: !Ref ConditionA
-      CONDITION_B: !Ref ConditionB
-
-LogGroup: Type: AWS::Logs::LogGroup Properties: LogGroupName: !Sub /aws/lambda/json-filter-handler RetentionInDays: 90
-
+Outputs:
+  FunctionName:
+    Value: !Ref JsonFilterFunction
+    Description: Deployed Lambda function name
