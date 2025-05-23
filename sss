@@ -183,3 +183,29 @@ DefinitionString:
         }
       }
     }
+"CheckEnd": {
+  "Type": "Choice",
+  "Choices": [
+    {
+      "Variable": "$.vars.streak",
+      "NumericGreaterThanEquals": 5,
+      "Next": "StartStep2"
+    },
+    {
+      "Variable": "$.vars.countNext",
+      "NumericLessThan": 60,
+      "Next": "Wait1Minute"
+    }
+  ],
+  "Default": "FailWithLog"
+},
+"LogVarsStep": {
+  "Type": "Pass",
+  "ResultPath": "$.logVars",
+  "Parameters": {
+    "streak.$": "$.vars.streak",
+    "count.$": "$.vars.count",
+    "countNext.$": "$.vars.countNext"
+  },
+  "Next": "CheckEnd"
+}
