@@ -1,171 +1,80 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: Lambda to process CSV or JSON-array-formatted files in S3 and classify them based on conditions.
+AWSTemplateFormatVersion: '2010-09-09' Description: Lambda to process large JSON files in S3, filter content into CSVs, and move to target bucket
 
-Parameters:
-  SourceBucket:
-    Type: String
-  DestinationBucket:
-    Type: String
-  ConditionA:
-    Type: String
-  ConditionB:
-    Type: String
+Parameters: SourceBucket: Type: String Description: Source S3 bucket name TargetBucket: Type: String Description: Target S3 bucket name to save processed files ConditionA: Type: String Description: Filter condition A (substring match) ConditionB: Type: String Description: Filter condition B (substring match)
 
-Resources:
-  CsvProcessorFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: CsvProcessor
-      Runtime: python3.12
-      Handler: index.lambda_handler
-      Timeout: 900
-      MemorySize: 2048
-      Role: !GetAtt LambdaExecutionRole.Arn
-      Environment:
-        Variables:
-          SOURCE_BUCKET: !Ref SourceBucket
-          DEST_BUCKET: !Ref DestinationBucket
-          COND_A: !Ref ConditionA
-          COND_B: !Ref ConditionB
-      Code:
-        ZipFile: |
-          import boto3
-          import csv
-          import io
-          import os
-          import json
-          import logging
+Resources: LambdaExecutionRole: Type: AWS::IAM::Role Properties: RoleName: json-filter-lambda-role AssumeRolePolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Principal: Service: lambda.amazonaws.com Action: sts:AssumeRole ManagedPolicyArns: - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole Policies: - PolicyName: LambdaS3Access PolicyDocument: Version: '2012-10-17' Statement: - Effect: Allow Action: - s3:GetObject - s3:DeleteObject - s3:ListBucket - s3:PutObject Resource: - !Sub arn:aws:s3:::${SourceBucket} - !Sub arn:aws:s3:::${SourceBucket}/* - !Sub arn:aws:s3:::${TargetBucket} - !Sub arn:aws:s3:::${TargetBucket}/*
 
-          s3 = boto3.client('s3')
-          logger = logging.getLogger()
-          logger.setLevel(logging.INFO)
+LambdaFunction: Type: AWS::Lambda::Function Properties: FunctionName: json-filter-handler Runtime: python3.12 Timeout: 300 MemorySize: 1024 Role: !GetAtt LambdaExecutionRole.Arn Handler: index.handler Code: ZipFile: | import boto3 import os import csv import json import io import logging
 
-          def lambda_handler(event, context):
-              source_bucket = os.environ['SOURCE_BUCKET']
-              destination_bucket = os.environ['DEST_BUCKET']
-              condition_a = os.environ['COND_A']
-              condition_b = os.environ['COND_B']
+logger = logging.getLogger()
+      logger.setLevel(logging.INFO)
 
-              response = s3.list_objects_v2(Bucket=source_bucket)
-              if 'Contents' not in response:
-                  logger.info(f"No files found in source bucket: {source_bucket}")
-                  return
+      s3 = boto3.client('s3')
 
-              tmp_dir = '/tmp'
-              files = {
-                  '1111.csv': open(os.path.join(tmp_dir, '1111.csv'), 'w', newline='', encoding='utf-8'),
-                  '2222.csv': open(os.path.join(tmp_dir, '2222.csv'), 'w', newline='', encoding='utf-8'),
-                  '3333.csv': open(os.path.join(tmp_dir, '3333.csv'), 'w', newline='', encoding='utf-8')
-              }
+      def handler(event, context):
+          source_bucket = os.environ['SOURCE_BUCKET']
+          target_bucket = os.environ['TARGET_BUCKET']
+          condition_a = os.environ['CONDITION_A']
+          condition_b = os.environ['CONDITION_B']
 
-              writers = {name: csv.writer(f) for name, f in files.items()}
+          a_rows, b_rows, other_rows = [], [], []
 
+          response = s3.list_objects_v2(Bucket=source_bucket)
+          for obj in response.get('Contents', []):
+              key = obj['Key']
+              if key.endswith('/'):
+                  continue
+              logger.info(f"Processing file: {key}")
+
+              file_obj = s3.get_object(Bucket=source_bucket, Key=key)
+              stream = file_obj['Body']
+              buffer = b""
+              for chunk in stream.iter_chunks(chunk_size=4096):
+                  buffer += chunk
               try:
-                  for obj in response['Contents']:
-                      key = obj['Key']
-                      if not key.endswith('.csv'):
-                          continue
-
-                      logger.info(f"Processing file: {key}")
-                      csv_obj = s3.get_object(Bucket=source_bucket, Key=key)
-                      content = csv_obj['Body'].read().decode('utf-8')
-
-                      try:
-                          json_array = json.loads(content)
-                          if isinstance(json_array, list):
-                              logger.info("Detected entire file as JSON array.")
-                              for value in json_array:
-                                  value = value.strip().strip('\"')
-                                  _write_value(value, writers, condition_a, condition_b)
-                              continue
-                      except json.JSONDecodeError:
-                          pass
-
-                      reader = csv.reader(io.StringIO(content))
-                      for row in reader:
-                          if not row:
-                              continue
-                          try:
-                              values = json.loads(row[0])
-                              if isinstance(values, list):
-                                  for value in values:
-                                      value = value.strip().strip('\"')
-                                      _write_value(value, writers, condition_a, condition_b)
-                                  continue
-                          except json.JSONDecodeError:
-                              pass
-                          value = row[0].strip().strip('\"')
-                          _write_value(value, writers, condition_a, condition_b)
-
-                  for filename, fileobj in files.items():
-                      fileobj.close()
-                      file_path = os.path.join(tmp_dir, filename)
-                      with open(file_path, 'rb') as f:
-                          logger.info(f"Uploading: {filename} to {destination_bucket}")
-                          s3.put_object(
-                              Bucket=destination_bucket,
-                              Key=filename,
-                              Body=f,
-                              ContentType='text/csv'
-                          )
-
-                  delete_keys = [{'Key': obj['Key']} for obj in response['Contents']]
-                  if delete_keys:
-                      logger.info(f"Deleting {len(delete_keys)} files from {source_bucket}")
-                      s3.delete_objects(Bucket=source_bucket, Delete={'Objects': delete_keys})
-
+                  text = buffer.decode('utf-8').strip()
+                  if text.startswith('[') and text.endswith(']'):
+                      text = text[1:-1].strip()
+                      items = text.split(',')
+                      for item in items:
+                          item = item.strip().strip('"')
+                          if condition_a in item:
+                              a_rows.append([item])
+                          elif condition_b in item:
+                              b_rows.append([item])
+                          else:
+                              other_rows.append([item])
+                  else:
+                      raise Exception("Invalid JSON array")
               except Exception as e:
-                  logger.error(f"Error occurred: {str(e)}", exc_info=True)
-                  raise
-              finally:
-                  [f.close() for f in files.values()]
+                  logger.error(f"Error parsing file {key}: {str(e)}")
 
-          def _write_value(value, writers, condition_a, condition_b):
-              if value == condition_a:
-                  writers['1111.csv'].writerow([value])
-              elif value == condition_b:
-                  writers['2222.csv'].writerow([value])
-              else:
-                  writers['3333.csv'].writerow([value])
+          def upload_csv(rows, name):
+              if not rows:
+                  return
+              csv_buffer = io.StringIO()
+              writer = csv.writer(csv_buffer)
+              writer.writerows(rows)
+              s3.put_object(Bucket=target_bucket, Key=name, Body=csv_buffer.getvalue())
+              logger.info(f"Uploaded {name} to {target_bucket}")
 
-  LambdaExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: LambdaS3ProcessorRole
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: S3AccessPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:PutObject
-                  - s3:DeleteObject
-                  - s3:ListBucket
-                Resource:
-                  - !Sub arn:aws:s3:::${SourceBucket}
-                  - !Sub arn:aws:s3:::${SourceBucket}/*
-                  - !Sub arn:aws:s3:::${DestinationBucket}
-                  - !Sub arn:aws:s3:::${DestinationBucket}/*
-              - Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: '*'
+          upload_csv(a_rows, '1111.csv')
+          upload_csv(b_rows, '2222.csv')
+          upload_csv(other_rows, '3333.csv')
 
-  LogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: !Sub "/aws/lambda/${CsvProcessorFunction}"
-      RetentionInDays: 90
+          for obj in response.get('Contents', []):
+              key = obj['Key']
+              if key.endswith('/'):
+                  continue
+              s3.delete_object(Bucket=source_bucket, Key=key)
+              logger.info(f"Deleted {key} from source bucket")
+
+  Environment:
+    Variables:
+      SOURCE_BUCKET: !Ref SourceBucket
+      TARGET_BUCKET: !Ref TargetBucket
+      CONDITION_A: !Ref ConditionA
+      CONDITION_B: !Ref ConditionB
+
+LogGroup: Type: AWS::Logs::LogGroup Properties: LogGroupName: !Sub /aws/lambda/json-filter-handler RetentionInDays: 90
+
