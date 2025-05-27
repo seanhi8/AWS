@@ -124,3 +124,24 @@ DynamoDBのリードキャパシティ調整が必要なケースあり
 CloudFrontのキャッシュ更新タイミングに注意
 
 
+9. AWSリソース一覧（参考）
+
+区分	サービス	用途	備考
+
+サイト	CloudFront	Web表示のCDN配信	WAFと連携
+サイト	WAF	セキュリティ制御	OWASP対応ルール適用
+サイト	ALB	EC2ルーティング	HTTP/HTTPS対応
+サイト	EC2	アプリケーションサーバ	Auto Scaling可能
+サイト	S3	ログ保存	アクセスログ、404ログ
+API	API Gateway	REST API公開	Lambda統合
+API	Lambda	バックエンド処理	Node.js/Python想定
+API	S3	コンテンツ保存	画像・ドキュメント等
+API	DynamoDB	メタデータ管理	単一テーブル設計も可
+管理	CloudFront	管理画面配信	S3オリジンSPA対応
+管理	S3	管理ツールホスティング	React/Vueベース
+共通	IAM	権限管理	最小権限原則で設計
+共通	CloudWatch	ログとメトリクス監視	アラート含む
+共通	SNS	障害通知	メール/Slack通知可能
+共通	VPC/NAT GW	ネットワーク構成	セキュアアクセス分離
+
+
