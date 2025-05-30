@@ -387,3 +387,47 @@ Lambda関数は現在デフォルトでVPCに配置されるため、外部ア�
 より具体的な構成（例：CloudFront + S3 + API Gateway）をご指定いただければ、それに応じたネットワーク設計もご提案できます。
 
 
+在 VPCなし構成のネットワーク監視設計 に関しては、以下のようなポイントに整理できます：
+
+
+---
+
+🛰️ VPCなし構成におけるネットワーク監視の設計ポイント（日本語）
+
+監視対象	推奨する手段
+
+APIやWebアクセス	CloudFront・API Gatewayのアクセスログ を有効化し、S3に保存（後でAthena等で分析可能）
+通信エラー・遅延	API Gatewayのメトリクス（4XX, 5XX, Latency）を CloudWatch Alarm で監視
+Lambdaのネットワーク通信失敗	CloudWatch Logsで ECONNREFUSED や ETIMEDOUT を検知し、SNSで通知
+S3アクセス	S3 Server Access Logs + CloudTrail（誰がいつどこからアクセスしたか）で監視
+WAF検出	AWS WAFのログをKinesis Firehose経由でS3に保存し、悪質なIPやパターンを分析
+
+
+
+---
+
+📦 監視構成イメージ図（テキスト版）
+
+[CloudFront] → [API Gateway] → [Lambda] → [S3 / DynamoDB]
+       ↓             ↓             ↓
+     WAF Logs    CW Metrics     CW Logs
+       ↓             ↓             ↓
+     S3          CW Alarm → SNS通知
+
+
+---
+
+🎯 補足：通知・可視化のおすすめ
+
+ツール	用途
+
+CloudWatch Dashboard	アクセス数、エラー率、レイテンシを可視化
+SNS + Lambda or ChatBot	障害検知時にSlackやメールに通知
+Athena + S3 Logs	ログを定期的に分析して不正アクセスを抽出
+
+
+
+---
+
+必要であれば、これらをCloudFormationテンプレートやCDKコードとして具体化も可能です。ご希望あればお知らせください。
+
