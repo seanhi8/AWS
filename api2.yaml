@@ -1,0 +1,219 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Deploy a secure API infrastructure with Lambda (Python 3.12), API Gateway,
+  API Key restriction, CORS support, WAF, and CloudFront. Lambda code is loaded from S3.
+
+Parameters:
+  LambdaSourceCodeS3Bucket:
+    Type: String
+    Description: Name of the S3 bucket containing the Lambda deployment package (.zip)
+  LambdaSourceCodeS3Key:
+    Type: String
+    Description: Key of the Lambda deployment zip file in the S3 bucket
+
+Resources:
+
+  # IAM Role for the Lambda function with basic permissions
+  MyLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: LambdaExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:*
+                  - s3:GetObject
+                  - dynamodb:*
+                Resource: "*"
+
+  # Lambda function using Python 3.12
+  MyLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: MyApiHandler
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt MyLambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaSourceCodeS3Bucket
+        S3Key: !Ref LambdaSourceCodeS3Key
+
+  # API Gateway Rest API definition
+  MyApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: MySecureApi
+
+  # API Gateway resource path /api
+  ApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref MyApi
+      ParentId: !GetAtt MyApi.RootResourceId
+      PathPart: api
+
+  # POST method integration with Lambda function and API key requirement
+  ApiPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MyApi
+      ResourceId: !Ref ApiResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub >-
+          arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MyLambdaFunction.Arn}/invocations
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+
+  # OPTIONS method for CORS preflight support
+  ApiOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MyApi
+      ResourceId: !Ref ApiResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # Grant API Gateway permission to invoke the Lambda function
+  LambdaApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MyLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MyApi}/*/POST/api
+
+  # Deploy the API Gateway and define the stage
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: [ApiPostMethod, ApiOptionsMethod]
+    Properties:
+      RestApiId: !Ref MyApi
+      StageName: prod
+
+  # API Key for client to access API
+  ApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    Properties:
+      Name: MyLocalClientApiKey
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Ref MyApi
+          StageName: prod
+
+  # Usage plan to throttle API usage and link to API key
+  ApiUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      UsagePlanName: MyUsagePlan
+      ApiStages:
+        - ApiId: !Ref MyApi
+          Stage: prod
+      Throttle:
+        RateLimit: 10     # 10 requests per second
+        BurstLimit: 2     # burst capacity of 2 requests
+      Quota:
+        Limit: 1000       # 1000 requests per month
+        Period: MONTH
+
+  # Bind the API Key to the Usage Plan
+  ApiUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref ApiUsagePlan
+
+  # AWS WAF to protect the CloudFront distribution
+  MyWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: MyApiWebACL
+      Scope: CLOUDFRONT
+      DefaultAction: { Allow: {} }
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: WAF
+        SampledRequestsEnabled: true
+      Rules:
+        - Name: AWSCommon
+          Priority: 1
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          OverrideAction: { None: {} }
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: Common
+            SampledRequestsEnabled: true
+
+  # CloudFront distribution to front the API Gateway
+  MyCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultCacheBehavior:
+          TargetOriginId: api-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, POST, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          ForwardedValues:
+            QueryString: true
+            Headers: ["Authorization", "X-Api-Key"]
+        Origins:
+          - Id: api-origin
+            DomainName: !Sub "${MyApi}.execute-api.${AWS::Region}.amazonaws.com"
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginPath: "/prod"
+        WebACLId: !GetAtt MyWebACL.Arn
+
+Outputs:
+  # API endpoint (CloudFront domain name)
+  ApiEndpoint:
+    Description: Public API endpoint served via CloudFront
+    Value: !Sub "https://${MyCloudFrontDistribution.DomainName}/api"
+
+  # API Key for client-side access
+  ApiKeyValue:
+    Description: API Key required in X-Api-Key header to access the endpoint
+    Value: !Ref ApiKey
