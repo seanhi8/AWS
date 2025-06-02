@@ -1,0 +1,76 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploy AWS Amplify App via GitHub / GitLab / CodeCommit / Manual Commit
+
+Parameters:
+  DeploymentMode:
+    Type: String
+    AllowedValues:
+      - GitHub
+      - GitLab
+      - CodeCommit
+      - ManualCommit
+    Description: Select source provider
+  RepoUrl:
+    Type: String
+    Default: ''
+    Description: Repository URL for GitHub/GitLab/CodeCommit (e.g., https://github.com/user/repo.git)
+  OAuthToken:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: GitHub or GitLab Personal Access Token (leave blank for CodeCommit or Manual)
+  BranchName:
+    Type: String
+    Default: main
+    Description: Branch to build and deploy
+Resources:
+  AmplifyApp:
+    Type: AWS::Amplify::App
+    Properties:
+      Name: !Sub "amplify-app-${AWS::StackName}"
+      Platform: WEB
+      Repository: !If [IsGitProvider, !Ref RepoUrl, !Ref "AWS::NoValue"]
+      OauthToken: !If [UseOauth, !Ref OAuthToken, !Ref "AWS::NoValue"]
+      AccessToken: !If [UseOauth, !Ref OAuthToken, !Ref "AWS::NoValue"]
+      BuildSpec: |
+        version: 1
+        frontend:
+          phases:
+            preBuild:
+              commands:
+                - npm ci
+            build:
+              commands:
+                - npm run build
+          artifacts:
+            baseDirectory: dist
+            files:
+              - '**/*'
+          cache:
+            paths:
+              - node_modules/**
+
+  AmplifyBranch:
+    Type: AWS::Amplify::Branch
+    Condition: IsGitProvider
+    Properties:
+      AppId: !GetAtt AmplifyApp.AppId
+      BranchName: !Ref BranchName
+
+Conditions:
+  IsGitProvider: !Or
+    - !Equals [!Ref DeploymentMode, GitHub]
+    - !Equals [!Ref DeploymentMode, GitLab]
+    - !Equals [!Ref DeploymentMode, CodeCommit]
+
+  UseOauth: !Or
+    - !Equals [!Ref DeploymentMode, GitHub]
+    - !Equals [!Ref DeploymentMode, GitLab]
+
+Outputs:
+  AppId:
+    Value: !GetAtt AmplifyApp.AppId
+    Description: The Amplify App ID
+  AppURL:
+    Value: !Sub "https://${BranchName}.${AmplifyApp.DefaultDomain}"
+    Description: Deployed App URL (if branch created)
