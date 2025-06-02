@@ -1,0 +1,91 @@
+AWSTemplateFormatVersion: '2010-09-09' Description: Microsoft Teams 経由で CodePipeline の承認を実行する可視化ステップ機能付きフロー
+
+Parameters: TeamsWebhookUrl: Type: String Description: Microsoft Teams の Incoming Webhook URL PipelineName: Type: String StageName: Type: String ActionName: Type: String
+
+Resources: ApprovalTopic: Type: AWS::SNS::Topic
+
+LambdaSendToTeams: Type: AWS::Lambda::Function Properties: FunctionName: SendToTeamsFunction Handler: index.handler Runtime: python3.12 Role: !GetAtt LambdaExecutionRole.Arn Timeout: 10 Environment: Variables: TEAMS_WEBHOOK: !Ref TeamsWebhookUrl Code: ZipFile: | import json, urllib.request, os
+
+def handler(event, context):
+          print("Received event:", json.dumps(event))
+          message = json.loads(event['Records'][0]['Sns']['Message'])
+          pipeline = message['approval']['pipelineName']
+          token = message['approval']['token']
+          summary = message['approval']['externalEntityLink']
+
+          base_url = "https://<your-api-id>.execute-api.<region>.amazonaws.com/prod/approval"
+          approve_url = f"{base_url}?pipeline={pipeline}&token={token}&status=Approved"
+          reject_url = f"{base_url}?pipeline={pipeline}&token={token}&status=Rejected"
+
+          card = {
+              "@type": "MessageCard",
+              "@context": "http://schema.org/extensions",
+              "summary": "CodePipeline 承認リクエスト",
+              "themeColor": "0076D7",
+              "title": f"デプロイの承認依頼：{pipeline}",
+              "text": "以下のボタンから承認または拒否してください。",
+              "potentialAction": [
+                  {
+                      "@type": "OpenUri",
+                      "name": "✔️ デプロイを承認する",
+                      "targets": [{"os": "default", "uri": approve_url}]
+                  },
+                  {
+                      "@type": "OpenUri",
+                      "name": "❌ デプロイを拒否する",
+                      "targets": [{"os": "default", "uri": reject_url}]
+                  }
+              ]
+          }
+
+          req = urllib.request.Request(
+              os.environ['TEAMS_WEBHOOK'],
+              data=json.dumps(card).encode('utf-8'),
+              headers={'Content-Type': 'application/json'}
+          )
+          with urllib.request.urlopen(req) as resp:
+              print(resp.read())
+          return {"status": "sent"}
+
+LambdaHandleApproval: Type: AWS::Lambda::Function Properties: FunctionName: HandleApprovalResult Handler: index.handler Runtime: python3.12 Role: !GetAtt LambdaExecutionRole.Arn Timeout: 10 Code: ZipFile: | import json, boto3, os
+
+def handler(event, context):
+          params = event['queryStringParameters']
+          pipeline = params['pipeline']
+          token = params['token']
+          status = params.get('status', 'Rejected')
+
+          client = boto3.client('codepipeline')
+          result = {
+              'summary': f'Microsoft Teams により{status}されました',
+              'status': status
+          }
+          response = client.put_approval_result(
+              pipelineName=pipeline,
+              stageName=os.environ['STAGE_NAME'],
+              actionName=os.environ['ACTION_NAME'],
+              result=result,
+              token=token
+          )
+
+          html = f"<h1>{status} 処理されました！</h1>"
+          return {
+              "statusCode": 200,
+              "headers": {"Content-Type": "text/html"},
+              "body": html
+          }
+  Environment:
+    Variables:
+      STAGE_NAME: !Ref StageName
+      ACTION_NAME: !Ref ActionName
+
+Outputs: SNSTopicArn: Description: CodePipeline 承認通知用 SNS トピックの ARN Value: !Ref ApprovalTopic
+
+LambdaSendToTeamsName: Description: Microsoft Teams に送信する Lambda 関数名 Value: !Ref LambdaSendToTeams
+
+LambdaHandleApprovalName: Description: 承認結果を処理する Lambda 関数名 Value: !Ref LambdaHandleApproval
+
+StepFunctionArn: Description: 可視化されたステップ承認フローの ARN Value: !Ref StepFunction
+
+APIGatewayURL: Description: Teams カードからの承認リンク（※実行後にステージ名を補完してください） Value: !Sub "https://${APIGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/approval"
+
