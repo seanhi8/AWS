@@ -1,0 +1,266 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CloudFormation template to enable Microsoft Teams approval for AWS CodePipeline
+  without logging into AWS console.
+
+Parameters:
+  TeamsWebhookUrl:
+    Type: String
+    Description: Microsoft Teams Incoming Webhook URL
+    Default: https://example.com/webhook-placeholder  # ← Real Webhook
+  PipelineName:
+    Type: String
+    Description: Name of the AWS CodePipeline requiring approval
+    Default: MyPipeline
+  StageName:
+    Type: String
+    Description: Name of the Stage in the pipeline requiring approval
+    Default: DeployStage
+  ActionName:
+    Type: String
+    Description: Name of the Manual Approval Action in the stage
+    Default: ManualApproval
+  TopicName:
+    Type: String
+    Description: Name of the SNS Topic to notify Teams
+    Default: pipeline-approval-topic
+
+Resources:
+  # SNS Topic that CodePipeline approval action publishes to
+  ApprovalTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Ref TopicName
+
+  # IAM Role for Lambda that sends Teams approval cards
+  NotificationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: notify-teams-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: '*'
+
+  # Lambda function that receives SNS events and sends adaptive card to Teams
+  NotifyTeamsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: notify-teams
+      Handler: index.lambda_handler
+      Runtime: python3.11
+      Timeout: 10
+      Role: !GetAtt NotificationLambdaRole.Arn
+      Environment:
+        Variables:
+          TEAMS_WEBHOOK_URL: !Ref TeamsWebhookUrl
+          APPROVAL_API_URL: !Sub https://${ApprovalApi}.execute-api.${AWS::Region}.amazonaws.com/prod
+          PIPELINE_NAME: !Ref PipelineName
+          STAGE_NAME: !Ref StageName
+          ACTION_NAME: !Ref ActionName
+      Code:
+        ZipFile: |
+          import json, os, urllib.request
+
+          def lambda_handler(event, context):
+              for record in event['Records']:
+                  message = json.loads(record['Sns']['Message'])
+                  approval = message.get('approval', {})
+
+                  # Validate only the intended pipeline/stage/action
+                  if approval.get('pipelineName') != os.environ['PIPELINE_NAME'] or \
+                     approval.get('stageName') != os.environ['STAGE_NAME'] or \
+                     approval.get('actionName') != os.environ['ACTION_NAME']:
+                      print("Ignored: unrelated approval message.")
+                      return
+
+                  token = approval['token']
+                  pipeline = approval['pipelineName']
+                  stage = approval['stageName']
+                  action = approval['actionName']
+                  api = os.environ['APPROVAL_API_URL']
+
+                  card = {
+                    "@type": "MessageCard",
+                    "@context": "http://schema.org/extensions",
+                    "summary": f"Approval Required: {pipeline}",
+                    "themeColor": "0076D7",
+                    "title": f"Approve Deployment for {pipeline}",
+                    "sections": [{
+                      "activityTitle": f"Stage: {stage}, Action: {action}",
+                      "text": "Approve or reject the pipeline deployment directly in Teams."
+                    }],
+                    "potentialAction": [
+                      {
+                        "@type": "HttpPOST",
+                        "name": "✅ Approve",
+                        "target": f"{api}/approve",
+                        "headers": [{"name": "Content-Type", "value": "application/json"}],
+                        "body": json.dumps({
+                          "pipeline": pipeline,
+                          "stage": stage,
+                          "action": action,
+                          "result": "Approved",
+                          "token": token
+                        })
+                      },
+                      {
+                        "@type": "HttpPOST",
+                        "name": "❌ Reject",
+                        "target": f"{api}/reject",
+                        "headers": [{"name": "Content-Type", "value": "application/json"}],
+                        "body": json.dumps({
+                          "pipeline": pipeline,
+                          "stage": stage,
+                          "action": action,
+                          "result": "Rejected",
+                          "token": token
+                        })
+                      }
+                    ]
+                  }
+
+                  req = urllib.request.Request(
+                      os.environ['TEAMS_WEBHOOK_URL'],
+                      data=json.dumps(card).encode('utf-8'),
+                      headers={'Content-Type': 'application/json'}
+                  )
+                  urllib.request.urlopen(req)
+
+  # Subscribe Lambda to SNS topic
+  NotifyLambdaSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref ApprovalTopic
+      Protocol: lambda
+      Endpoint: !GetAtt NotifyTeamsLambda.Arn
+
+  # Allow SNS to invoke Lambda
+  PermissionForSNSToInvokeNotifyLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref NotifyTeamsLambda
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref ApprovalTopic
+
+  # IAM Role for Lambda that puts approval result to CodePipeline
+  ApprovalLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: approve-teams-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ApprovePipeline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: codepipeline:PutApprovalResult
+                Resource: '*'
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: '*'
+
+  # Lambda that handles Teams button click and calls CodePipeline approval
+  TeamsApprovalLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: approve-from-teams
+      Handler: index.lambda_handler
+      Runtime: python3.11
+      Timeout: 10
+      Role: !GetAtt ApprovalLambdaRole.Arn
+      Environment:
+        Variables:
+          PIPELINE_NAME: !Ref PipelineName
+          STAGE_NAME: !Ref StageName
+          ACTION_NAME: !Ref ActionName
+      Code:
+        ZipFile: |
+          import json, boto3, os
+
+          def lambda_handler(event, context):
+              body = json.loads(event['body'])
+
+              # Validate incoming request matches the expected pipeline/stage/action
+              if body['pipeline'] != os.environ['PIPELINE_NAME'] or \
+                 body['stage'] != os.environ['STAGE_NAME'] or \
+                 body['action'] != os.environ['ACTION_NAME']:
+                  return {
+                      'statusCode': 403,
+                      'body': json.dumps({'message': 'Invalid pipeline, stage, or action'})
+                  }
+
+              client = boto3.client('codepipeline')
+              client.put_approval_result(
+                  pipelineName=body['pipeline'],
+                  stageName=body['stage'],
+                  actionName=body['action'],
+                  result={
+                      'summary': f"{body['result']} from Teams",
+                      'status': body['result']
+                  },
+                  token=body['token']
+              )
+
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({'message': f"{body['result']} submitted"})
+              }
+
+  # API Gateway for Teams button to call Lambda
+  ApprovalApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: teams-approval-api
+
+  ApprovalResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt ApprovalApi.RootResourceId
+      PathPart: "{action}"
+      RestApiId: !Ref ApprovalApi
+
+  ApprovalMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApprovalApi
+      ResourceId: !Ref ApprovalResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TeamsApprovalLambda.Arn}/invocations
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TeamsApprovalLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApprovalApi}/*/POST/*
+
+Outputs:
+  SNSTopicArn:
+    Value: !Ref ApprovalTopic
+    Description: SNS Topic to be used in CodePipeline ManualApproval
+  ApprovalAPIEndpoint:
+    Value: !Sub https://${ApprovalApi}.execute-api.${AWS::Region}.amazonaws.com/prod
+    Description: Use this endpoint in Teams Adaptive Card button
