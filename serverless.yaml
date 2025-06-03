@@ -1,0 +1,266 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploy frontend/backend API Gateway + Lambda with CloudFront, WAF, DynamoDB, monitoring and alerting.
+
+Parameters:
+  FrontendLambdaName:
+    Type: String
+    Default: "FrontendLambda"
+  BackendLambdaName:
+    Type: String
+    Default: "BackendLambda"
+  FrontendAPIName:
+    Type: String
+    Default: "FrontendAPI"
+  BackendAPIName:
+    Type: String
+    Default: "BackendAPI"
+  LambdaS3Bucket:
+    Type: String
+  LambdaS3KeyFrontend:
+    Type: String
+  LambdaS3KeyBackend:
+    Type: String
+  StaticSiteBucketName:
+    Type: String
+  CloudFrontDomainName:
+    Type: String
+  AlertEmail:
+    Type: String
+  DynamoDBTableName:
+    Type: String
+
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-LambdaRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  FrontendLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref FrontendLambdaName
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaS3KeyFrontend
+      Runtime: python3.12
+      MemorySize: 128
+      Timeout: 10
+
+  BackendLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref BackendLambdaName
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaS3KeyBackend
+      Runtime: python3.12
+      MemorySize: 256
+      Timeout: 15
+
+  FrontendAPI:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Ref FrontendAPIName
+      ProtocolType: HTTP
+
+  FrontendIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref FrontendAPI
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FrontendLambda.Arn}/invocations"
+      PayloadFormatVersion: "2.0"
+
+  FrontendRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref FrontendAPI
+      RouteKey: "ANY /{proxy+}"
+      Target: !Sub "integrations/${FrontendIntegration}"
+
+  FrontendPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FrontendLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${FrontendAPI}/*/*/*"
+
+  BackendAPI:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Ref BackendAPIName
+      ProtocolType: HTTP
+
+  BackendIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref BackendAPI
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BackendLambda.Arn}/invocations"
+      PayloadFormatVersion: "2.0"
+
+  BackendRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref BackendAPI
+      RouteKey: "ANY /api/{proxy+}"
+      Target: !Sub "integrations/${BackendIntegration}"
+
+  BackendPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BackendLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${BackendAPI}/*/*/*"
+
+  AdminSiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref StaticSiteBucketName
+      WebsiteConfiguration:
+        IndexDocument: index.html
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+
+  WAFWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub "${AWS::StackName}-WebACL"
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "${AWS::StackName}-webacl"
+        SampledRequestsEnabled: true
+      Rules:
+        - Name: AWS-AWSManagedRulesCommonRuleSet
+          Priority: 0
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: CommonRuleSet
+
+  AdminCloudFront:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: AdminS3Origin
+            DomainName: !Sub "${StaticSiteBucketName}.s3-website-${AWS::Region}.amazonaws.com"
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+          - Id: BackendAPIOrigin
+            DomainName: !Sub "${BackendAPI}.execute-api.${AWS::Region}.amazonaws.com"
+            OriginPath: "/"
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+        DefaultCacheBehavior:
+          TargetOriginId: AdminS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: ["GET", "HEAD"]
+          CachedMethods: ["GET", "HEAD"]
+          ForwardedValues:
+            QueryString: false
+        CacheBehaviors:
+          - PathPattern: "/api/*"
+            TargetOriginId: BackendAPIOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"]
+            CachedMethods: ["GET", "HEAD", "OPTIONS"]
+            ForwardedValues:
+              QueryString: true
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+        Aliases:
+          - !Ref CloudFrontDomainName
+        WebACLId: !GetAtt WAFWebACL.Arn
+
+  AlarmSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint: !Ref AlertEmail
+          Protocol: email
+
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${BackendLambdaName}-Errors"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref BackendLambdaName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref AlarmSNSTopic
+
+  API4XXAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${BackendAPIName}-4XX"
+      MetricName: 4XXError
+      Namespace: AWS/ApiGateway
+      Dimensions:
+        - Name: ApiName
+          Value: !Ref BackendAPIName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref AlarmSNSTopic
+
+  DynamoTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref DynamoDBTableName
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+Outputs:
+  FrontendAPIURL:
+    Value: !Sub "https://${FrontendAPI}.execute-api.${AWS::Region}.amazonaws.com"
+  BackendAPIURL:
+    Value: !Sub "https://${BackendAPI}.execute-api.${AWS::Region}.amazonaws.com"
+  AdminCloudFrontURL:
+    Value: !Sub "https://${CloudFrontDomainName}"
+  SNSAlertTopicArn:
+    Value: !Ref AlarmSNSTopic
