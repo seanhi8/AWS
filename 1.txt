@@ -1,0 +1,33 @@
+🧾 システム構築における基盤チーム向け事前確認リスト（会議用）
+
+区分	確認項目	内容・補足	備考
+
+1. ネットワーク設計	VPC／サブネット構成	Lambda や API Gateway をパブリック/プライベートどちらに配置するか	必要に応じてVPC Lambda構成
+	セキュリティグループ	Lambda、CloudFront等の通信制御ポリシー確認	通信方向、ポート範囲など
+2. IAM設計	Lambda 実行ロール	最小権限の原則に基づいた IAM Role 設計	DynamoDB、S3、CloudWatchへのアクセス含む
+	Appチーム向けロール or ポリシー	Lambda ZIPのS3アップロード、ログ確認権限など	ロール分離の方針
+3. S3バケット設計	Lambdaコード格納用バケット	frontend / backend のZIP配置ポリシー確認	バケット名・アップロード経路確認
+	EventBridge連携用バケット	イベント通知有効化要否、通知先設計	EventBridge ON
+	ログ／静的ファイルバケット	CloudFront配信用 or ログ保存用	ライフサイクル設定含む
+4. CloudFront + WAF	WAFルール設計	Core Rule Set利用、IP制限、Geo制限の必要性	WebACLの対象リソース確認
+	CloudFrontの分離設計	frontend/backend 分けるか、1つにまとめるか	オリジン、キャッシュポリシー設計要
+5. API Gateway	API種類選定	HTTP API / REST API の選択（今回はHTTP API）	Lambda統合方式確認（AWS_PROXY）
+	ログ・認証設計	アクセスログの保存先／必要な認証方法（JWT等）	OpenAPI利用有無も確認
+6. DynamoDB	テーブル構成	キー設計（パーティションキー／ソートキー）	PITR有効化（35日）、暗号化方針確認
+	アクセス権限	Appチームの読み書き権限スコープ	Lambda Roleとの関連性あり
+7. Lambda関数	ランタイム／設定	Python 3.12利用確認、メモリ/タイムアウト値の初期設定	ZIP配置方法（S3経由）も
+	バージョン管理・Alias	alias利用、ステージごとのバージョン固定要否	blue/green対応の方針確認
+8. EventBridge連携	イベントソース／ターゲット設計	S3イベントなどの統一管理ポリシー	イベントバス必要性含む
+9. CloudWatch / SNS	監視対象	Lambdaエラー、DynamoDBスロットル、APIアクセスログ等	しきい値、評価期間の初期値確認
+	通知先設計	SNSトピック作成、メール通知先アドレスの登録	共通チャンネルを使うかチーム単位か
+10. タグ運用ポリシー	リソースタグの命名規則	環境（dev/stg/prod）、チーム名、用途など	予算管理・セキュリティ対策用
+
+---
+
+🔚 備考：
+
+会議時は、Appチームも参加して各責任範囲を明確に切り分けることが望ましい。
+
+必要に応じて、「開発環境」「本番環境」分けて検討。
+
+CloudFormation／CDK 利用方針により、自動化設計（Pipeline含む）も要確認。
