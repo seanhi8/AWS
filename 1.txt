@@ -1,33 +1,96 @@
-🧾 システム構築における基盤チーム向け事前確認リスト（会議用）
+# システム基本設計書（Basic Design Document）
 
-区分	確認項目	内容・補足	備考
+## 1. システム概要
 
-1. ネットワーク設計	VPC／サブネット構成	Lambda や API Gateway をパブリック/プライベートどちらに配置するか	必要に応じてVPC Lambda構成
-	セキュリティグループ	Lambda、CloudFront等の通信制御ポリシー確認	通信方向、ポート範囲など
-2. IAM設計	Lambda 実行ロール	最小権限の原則に基づいた IAM Role 設計	DynamoDB、S3、CloudWatchへのアクセス含む
-	Appチーム向けロール or ポリシー	Lambda ZIPのS3アップロード、ログ確認権限など	ロール分離の方針
-3. S3バケット設計	Lambdaコード格納用バケット	frontend / backend のZIP配置ポリシー確認	バケット名・アップロード経路確認
-	EventBridge連携用バケット	イベント通知有効化要否、通知先設計	EventBridge ON
-	ログ／静的ファイルバケット	CloudFront配信用 or ログ保存用	ライフサイクル設定含む
-4. CloudFront + WAF	WAFルール設計	Core Rule Set利用、IP制限、Geo制限の必要性	WebACLの対象リソース確認
-	CloudFrontの分離設計	frontend/backend 分けるか、1つにまとめるか	オリジン、キャッシュポリシー設計要
-5. API Gateway	API種類選定	HTTP API / REST API の選択（今回はHTTP API）	Lambda統合方式確認（AWS_PROXY）
-	ログ・認証設計	アクセスログの保存先／必要な認証方法（JWT等）	OpenAPI利用有無も確認
-6. DynamoDB	テーブル構成	キー設計（パーティションキー／ソートキー）	PITR有効化（35日）、暗号化方針確認
-	アクセス権限	Appチームの読み書き権限スコープ	Lambda Roleとの関連性あり
-7. Lambda関数	ランタイム／設定	Python 3.12利用確認、メモリ/タイムアウト値の初期設定	ZIP配置方法（S3経由）も
-	バージョン管理・Alias	alias利用、ステージごとのバージョン固定要否	blue/green対応の方針確認
-8. EventBridge連携	イベントソース／ターゲット設計	S3イベントなどの統一管理ポリシー	イベントバス必要性含む
-9. CloudWatch / SNS	監視対象	Lambdaエラー、DynamoDBスロットル、APIアクセスログ等	しきい値、評価期間の初期値確認
-	通知先設計	SNSトピック作成、メール通知先アドレスの登録	共通チャンネルを使うかチーム単位か
-10. タグ運用ポリシー	リソースタグの命名規則	環境（dev/stg/prod）、チーム名、用途など	予算管理・セキュリティ対策用
+本システムは、オンプレミス環境とクラウド（AWS）上の機能を連携させ、APIを介して情報の送受信を行うハイブリッド構成のWebアプリケーションです。AWSサービスを活用してセキュアかつスケーラブルな基盤を構築し、ユーザーおよび管理者向けのインタフェースを提供します。
 
 ---
 
-🔚 備考：
+## 2. システム構成図（概要）
 
-会議時は、Appチームも参加して各責任範囲を明確に切り分けることが望ましい。
+* **Frontend/Local連携系**（API Gateway + Lambda）
+* **Backend管理系**（CloudFront + WAF + API Gateway + Lambda）
+* **共通基盤**：S3、DynamoDB、EventBridge、CloudWatch、SNS
 
-必要に応じて、「開発環境」「本番環境」分けて検討。
+---
 
-CloudFormation／CDK 利用方針により、自動化設計（Pipeline含む）も要確認。
+## 3. 使用サービスと役割
+
+| サービス                   | 役割                              |
+| ---------------------- | ------------------------------- |
+| S3                     | Lambdaコード（ZIP）の格納、イベント通知連携      |
+| CloudFront             | 管理者画面への静的コンテンツ配信                |
+| WAF                    | 不正アクセス対策（Core Rule Set使用）       |
+| API Gateway (HTTP API) | フロント/バックエンドからのリクエスト受け口、Lambda連携 |
+| Lambda (Python 3.12)   | 業務ロジック処理（APIリクエスト、DB操作等）        |
+| DynamoDB               | データストア、PITR（35日）有効化             |
+| EventBridge            | S3イベントのトリガー処理                   |
+| CloudWatch             | ログ出力、アラーム設定                     |
+| SNS                    | 通知（アラーム時メール配信等）                 |
+
+---
+
+## 4. 環境構成
+
+| 項目            | 内容                    |
+| ------------- | --------------------- |
+| 環境種別          | dev / stg / prod      |
+| リージョン         | ap-northeast-1（東京）    |
+| Lambda実行環境    | Python 3.12、S3よりZIP取得 |
+| API Gateway種別 | HTTP API（Lambda統合）    |
+
+---
+
+## 5. 機能一覧
+
+### 5.1 フロントエンド連携機能（オンプレ連携）
+
+* オンプレシステムからHTTP API経由でLambdaを呼び出す
+* 必要なデータ処理を行い、DynamoDBへ書き込み
+
+### 5.2 バックエンド管理機能
+
+* 管理者向け画面はCloudFront配信
+* CloudFront → WAF → API Gateway → Lambda 経由でAPI操作
+* 出力結果はJSONとして提供、必要に応じてDynamoDB参照
+
+---
+
+## 6. セキュリティ設計
+
+* WAF：AWS Managed Rules（Core Rule Set）適用
+* IAM：最小権限の原則で各ロール設計（Lambda実行ロール、APIアクセスロール等）
+* S3：バケットポリシー／暗号化設定（SSE-S3）有効
+
+---
+
+## 7. 可観測性・監視
+
+* CloudWatch Logs：各Lambda／API Gatewayアクセスログ出力
+* CloudWatch Alarms：Lambdaエラー回数、APIアクセスエラー等
+* SNS：アラーム検知時にメール通知
+
+---
+
+## 8. イベント駆動設計
+
+* S3アップロード（ZIPファイル）によりEventBridgeトリガー発火（必要に応じて）
+
+---
+
+## 9. 拡張性・今後の課題
+
+* ACMを用いたHTTPS証明書自動発行（将来的に適用）
+* Lambdaバージョン管理およびエイリアス展開によるBlue/Greenデプロイ対応
+* DevOps強化のためCodePipeline/CDK導入検討
+
+---
+
+## 10. 補足情報
+
+* テンプレートはCloudFormation YAML形式にて構築自動化対応済み
+* 基盤構成はタグにより「基盤チーム」「Appチーム」管理を分離
+
+---
+
+以上
