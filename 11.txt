@@ -1,76 +1,63 @@
-1. 基本情報
+📋 1. CloudFront の確認項目
 
-[ ] 関数名（Function Name）
+項目	内容
 
-[ ] 説明（Description）
-
-[ ] ランタイム（Runtime）例：Python 3.12 / Node.js 20.x など
-
-[ ] アーキテクチャ（Architecture）例：x86_64 / arm64
-
-[ ] ハンドラ（Handler）例：index.handler など
-
-[ ] タイムアウト（Timeout）例：3秒、10秒など
-
-[ ] メモリサイズ（Memory Size）例：128MB～10240MB
-
-[ ] 環境変数（Environment Variables）
-
-[ ] エイリアス・バージョン管理（Alias / Version 管理）
-
-
-2. IAM・セキュリティ
-
-[ ] 実行ロール（Execution Role）名と内容
-
-[ ] VPC設定（VPC接続の有無・Subnet / Security Group）
-
-[ ] 環境変数の暗号化（KMSキーの使用有無）
-
-[ ] コンテナイメージ使用の有無（必要であれば ECR リンク）
-
-[ ] ソースコードのアップロード元（ZIP / S3 / ECR）
+Distribution ID / 名称	ディストリビューションの識別子と名前
+ステータス	有効化（Enabled）／無効化（Disabled）
+ドメイン名	xxxxx.cloudfront.net
+オリジン設定	接続元（S3, ALB など）、プロトコルポリシー
+ビヘイビア設定	パスごとのキャッシュ動作 /api/* など
+プロトコルポリシー	HTTP → HTTPS リダイレクト設定
+キャッシュポリシー	TTL、クエリ文字列、ヘッダー等の設定
+リクエストポリシー	オリジンに転送するヘッダー・Cookie 等
+WAF の関連付け	使用中の WAF Web ACL ID
+ログ記録	有効／無効、S3 バケットの指定有無
+地理的制限	国別アクセス制限の設定有無
+IPv6 対応	有効／無効
+エラーページ設定	カスタムエラーページ使用有無
+Lambda@Edge / Function	関連付けられた関数の有無
+料金クラス	使用エリア（全世界 or 限定地域）
 
 
-3. トリガー設定
 
-[ ] トリガータイプ（例：API Gateway、S3、EventBridge、SNS、DynamoDB Streamsなど）
+---
 
-[ ] トリガー設定の詳細（ルール、フィルタ、イベントタイプなど）
+📋 2. WAF の確認項目
 
-[ ] トリガーとの統合テスト予定の有無
+項目	内容
 
-
-4. ログ・モニタリング
-
-[ ] CloudWatch Logs 出力の有無
-
-[ ] ログ保持期間（例：1週間、無期限など）
-
-[ ] メトリクス監視（例：エラー率、呼び出し回数、Durationなど）
-
-[ ] アラーム設定（必要に応じて）
-
-
-5. デプロイ・CI/CD関連
-
-[ ] デプロイ方法（手動 / CodePipeline / CDK / CloudFormation など）
-
-[ ] バージョン更新のタイミングと方法（自動 or 手動）
-
-[ ] 本番環境・ステージング環境の切り替え戦略（例：Alias を利用）
-
-[ ] ブルーグリーン or カナリアデプロイ戦略の使用有無
+Web ACL 名／ID	使用中の WAF Web ACL の名前と ARN
+スコープ	Global（CloudFront）または Regional（ALB など）
+デフォルトアクション	Allow／Block
+関連付けリソース	CloudFront、ALB、API Gateway 等
+マネージドルール	AWS 提供のルールグループを使用しているか
+カスタムルール	IP 制限、Geo、正規表現、Rate 限定等
+Rate-based ルール	単一 IP アドレスのリクエスト制限
+優先順位（Priority）	ルールの適用順序
+ログ設定	Kinesis Firehose + S3 に記録しているか
+CloudWatch 指標	ルールのメトリクスを有効化しているか
+アクション種別	Allow / Block / Count / CAPTCHA / Challenge
+IP Set 使用状況	ホワイト／ブラックリストの利用状況
+タグ	プロジェクトや担当チーム等の管理タグ
 
 
-6. その他
 
-[ ] デバッグ・テストデータの用意状況
+---
 
-[ ] 開発・本番での設定差分の整理
+📋 3. DynamoDB の確認項目
 
-[ ] 外部サービスとの連携内容（APIキー、外部DB等）
+項目	内容
 
-[ ] 他Lambdaやリソースとの依存関係
-
-[ ] 保守・監視体制（誰が責任者か、オンコールなど）
+テーブル名	使用中のテーブル名
+主キー構造	パーティションキー／ソートキー（ある場合）
+読み書きキャパシティモード	オンデマンド or プロビジョンド
+プロビジョン値（RCU/WCU）	プロビジョンド時の設定値
+Auto Scaling 設定	自動スケーリング有効かどうか
+GSI（グローバルセカンダリインデックス）	存在有無とその内容
+LSI（ローカルセカンダリインデックス）	使用している場合のみ
+TTL（Time To Live）	自動削除設定の有効／無効
+ストリーム設定	Lambda 連携等に使用されているか
+暗号化	AWS管理／カスタムKMSキー
+バックアップ	オンデマンド or PITR の使用状況
+アラーム	CloudWatch での監視設定
+タグ	環境（dev, stg, prod）等の識別用タグ
