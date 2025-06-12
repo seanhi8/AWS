@@ -1,0 +1,370 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Frontend/Local連携系 + Backend管理系 + 共通基盤構成テンプレート
+  環境は stg / prd のみ対応
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues:
+      - stg
+      - prd
+    Default: stg
+    Description: デプロイ環境を指定してください
+  LambdaCodeS3Bucket:
+    Type: String
+    Default: "my-lambda-code-bucket"
+    Description: LambdaコードZIPファイルが格納されたS3バケット名
+  LambdaCodeS3KeyFrontend:
+    Type: String
+    Default: "frontend.zip"
+    Description: Frontend用Lambda ZIPのS3キー
+  LambdaCodeS3KeyBackend:
+    Type: String
+    Default: "backend.zip"
+    Description: Backend用Lambda ZIPのS3キー
+
+Resources:
+  # IAM Role for Lambda Execution
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Environment}-lambda-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3ReadAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub "arn:aws:s3:::${LambdaCodeS3Bucket}/*"
+                  - !Sub "arn:aws:s3:::${Environment}-backend-static/*"
+
+  # 共通基盤リソース
+  SharedS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${Environment}-shared-bucket"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  SharedDynamoDB:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${Environment}-shared-table"
+      AttributeDefinitions:
+        - AttributeName: "id"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "id"
+          KeyType: "HASH"
+      BillingMode: PAY_PER_REQUEST
+
+  SharedEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub "${Environment}-eventbus"
+
+  SharedTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${Environment}-shared-topic"
+
+  SharedCloudWatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/${Environment}/shared"
+
+  SharedSESIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: "noreply@example.com"  # ← 実際運用時は検証済メールに変更してください
+
+  # Frontend/Local連携系
+
+  FrontendLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Environment}-frontend-fn"
+      Handler: index.php
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: provided.al2
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeS3KeyFrontend
+      Timeout: 10
+      MemorySize: 512
+      Architectures:
+        - x86_64
+
+  FrontendApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${Environment}-frontend-api"
+      ProtocolType: HTTP
+
+  FrontendIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref FrontendApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt FrontendLambdaFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  # Frontend API Routes (複数パス例)
+  FrontendRouteAnyProxy:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref FrontendApi
+      RouteKey: "ANY /{proxy+}"
+      Target: !Sub "integrations/${FrontendIntegration}"
+
+  FrontendRouteHealth:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref FrontendApi
+      RouteKey: "GET /health"
+      Target: !Sub "integrations/${FrontendIntegration}"
+
+  FrontendRouteUsers:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref FrontendApi
+      RouteKey: "GET /api/v1/users"
+      Target: !Sub "integrations/${FrontendIntegration}"
+
+  FrontendStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref FrontendApi
+      StageName: "$default"
+      AutoDeploy: true
+
+  FrontendLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FrontendLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${FrontendApi}/*/*/*"
+
+  # Backend管理系
+
+  BackendLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Environment}-backend-fn"
+      Handler: index.php
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: provided.al2
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeS3KeyBackend
+      Timeout: 10
+      MemorySize: 512
+      Architectures:
+        - x86_64
+
+  BackendApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${Environment}-backend-api"
+      ProtocolType: HTTP
+
+  BackendIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref BackendApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt BackendLambdaFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  # Backend API Routes (複数パス例)
+  BackendRouteAnyProxy:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref BackendApi
+      RouteKey: "ANY /{proxy+}"
+      Target: !Sub "integrations/${BackendIntegration}"
+
+  BackendRouteHealth:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref BackendApi
+      RouteKey: "GET /health"
+      Target: !Sub "integrations/${BackendIntegration}"
+
+  BackendRouteUsers:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref BackendApi
+      RouteKey: "GET /api/v1/users"
+      Target: !Sub "integrations/${BackendIntegration}"
+
+  BackendStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref BackendApi
+      StageName: "$default"
+      AutoDeploy: true
+
+  BackendLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BackendLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${BackendApi}/*/*/*"
+
+  BackendS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${Environment}-backend-static"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  BackendCloudFrontOAI:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub "${Environment} Backend OAI"
+
+  BackendS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BackendS3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipalReadOnly
+            Effect: Allow
+            Principal:
+              CanonicalUser: !GetAtt BackendCloudFrontOAI.S3CanonicalUserId
+            Action:
+              - s3:GetObject
+            Resource: !Sub "${BackendS3Bucket.Arn}/*"
+
+  BackendCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: BackendS3Origin
+            DomainName: !GetAtt BackendS3Bucket.DomainName
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub "origin-access-identity/cloudfront/${BackendCloudFrontOAI}"
+        DefaultCacheBehavior:
+          TargetOriginId: BackendS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          ForwardedValues:
+            QueryString: false
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+  # WAFv2 WebACL (AWS Managed Rules + Bot Control含む)
+  BackendWAFWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub "${Environment}-backend-waf"
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "${Environment}-backend-waf"
+      Rules:
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 0
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesCommonRuleSet
+
+        - Name: AWSManagedRulesSQLiRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesSQLiRuleSet
+
+        - Name: AWSManagedRulesAmazonIpReputationList
+          Priority: 2
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesAmazonIpReputationList
+
+        - Name: AWSManagedRulesBotControlRuleSet
+          Priority: 3
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesBotControlRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesBotControlRuleSet
+
+  BackendWAFAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !GetAtt BackendCloudFrontDistribution.Arn
+      WebACLArn: !Ref BackendWAFWebACL
+
+Outputs:
+  FrontendApiEndpoint:
+    Description: Frontend API Gateway URL
+    Value: !Sub "https://${FrontendApi}.execute-api.${AWS::Region}.amazonaws.com/"
+  BackendApiEndpoint:
+    Description: Backend API Gateway URL
+    Value: !Sub "https://${BackendApi}.execute-api.${AWS::Region}.amazonaws.com/"
+  BackendCloudFrontDomainName:
+    Description: Backend CloudFront URL
+    Value: !GetAtt BackendCloudFrontDistribution.DomainName
