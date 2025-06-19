@@ -1,0 +1,202 @@
+サーバーレス統合システム構築仕様書（詳細版）
+1. はじめに
+本仕様書は、AWS上に構築するサーバーレス統合Webシステムの設計・構築指針を示し、第三者ベンダーによる確実かつ安全な構築作業を支援することを目的とする。
+
+2. システム構成概要
+フロントエンド配信系
+
+CloudFront + WAF v2（AWS管理ルール＋Botコントロール有効）
+
+S3静的ホスティングバケット（非公開、OAI経由アクセスのみ）
+
+HTTP API Gateway（フロントエンドAPI用）
+
+Lambda関数（PHP runtime、provided.al2、コードはLayer＋個別コードZIP）
+
+バックエンド管理系
+
+CloudFront + WAF v2
+
+S3データバケット（非公開）
+
+HTTP API Gateway（管理API用）
+
+Lambda関数（同様）
+
+共通基盤
+
+DynamoDB（オンデマンド課金）
+
+EventBridge
+
+CloudWatch Logs/Metric
+
+SNS / SES
+
+3. 各リソース詳細仕様
+3.1 CloudFront
+ディストリビューション作成時の設定
+
+Origin: フロントエンドS3バケット（OAI設定必須）とAPI Gatewayのマルチオリジン設定
+
+Viewer Protocol Policy: HTTPSのみ許可
+
+キャッシュポリシー: 静的コンテンツは長め（TTL 86400秒）、APIはキャッシュ無効
+
+WAFv2 WebACL適用（管理ルールセット＋Botコントロール）
+
+ログ配信設定有効（S3ログバケット指定）
+
+3.2 WAF v2
+適用マネージドルールセット：
+
+AWSManagedRulesCommonRuleSet
+
+AWSManagedRulesSQLiRuleSet
+
+AWSManagedRulesXSSRuleSet
+
+AWSManagedRulesBotControlRuleSet（必須）
+
+カスタムルール追加不要（要件次第で別途）
+
+ログはCloudWatch Logsへ出力設定
+
+3.3 S3 バケット
+静的ファイル用バケット
+
+パブリックアクセス禁止
+
+CloudFront OAI経由GetObjectのみ許可するバケットポリシー
+
+バージョニング有効
+
+ライフサイクル設定（90日後Glacier移行推奨）
+
+データ用バケット
+
+非公開、Lambda実行ロールからのアクセス権限付与
+
+バージョニング有効
+
+ライフサイクルルール設定可
+
+3.4 API Gateway (HTTP API)
+ステージ名: stg, prd で環境分離
+
+CORS設定:
+
+許可オリジン: CloudFrontドメイン
+
+許可メソッド: GET, POST, PUT, DELETE, OPTIONS
+
+許可ヘッダー: Content-Type, Authorizationなど
+
+エンドポイント例: /api/*, /admin/*, /v1/*
+
+全API呼び出しを単一Lambda関数のDispatcherへ集約（Lambdaプロキシ統合利用）
+
+3.5 Lambda 関数（Layer利用）
+構成
+
+Lambda LayerにPHPランタイムおよび共通ライブラリを格納
+
+関数固有のDispatcherロジックは別ZIPでデプロイし、Layerを参照
+
+ランタイム: provided.al2
+
+メモリ: 512MB～2048MB（要件に応じて調整）
+
+タイムアウト: 30秒
+
+環境変数: DynamoDBテーブル名、S3バケット名、SNSトピックARN、環境名など
+
+IAMロール:
+
+DynamoDB（限定的GetItem, PutItem, Query）
+
+S3（静的＋データバケットのGetObject, PutObject）
+
+SNS, SES Publish権限
+
+CloudWatch Logs書込権限（ログは90日間保持設定）
+
+ログ出力: CloudWatch Logsへ出力、Retentionは90日設定
+
+3.6 DynamoDB
+課金モード: オンデマンド
+
+パーティションキー: UserId（String）
+
+ソートキー（任意）: Timestamp（Number）
+
+TTL設定可能
+
+必要に応じグローバルセカンダリインデックス設置
+
+3.7 EventBridge
+ルール作成しLambda、SNS等にイベント連携
+
+デフォルトイベントバス使用
+
+イベントパターンで必要イベントのみフィルタリング
+
+3.8 SNS / SES
+SNS: 通知トピック作成、管理者メールなどに連携
+
+SES:
+
+サンドボックス解除済みアカウントを必須
+
+送信ドメイン認証（SPF/DKIM）済み
+
+送信失敗監視アラーム推奨
+
+4. IAMロール・ポリシー
+Lambda実行ロール: DynamoDB, S3, SNS, SES, CloudWatch Logs権限を限定付与
+
+API Gatewayロール: Lambda呼び出し権限
+
+CloudFront OAIユーザー: S3バケットGetObjectのみ許可
+
+5. デプロイ手順
+Lambda Layerを先にS3へアップロードしバージョニング管理
+
+その後、Dispatcherコードを別ZIPでアップロード
+
+CDKでstg/prdの環境切替可能にスタック管理
+
+cdk diffによる差分確認推奨
+
+デプロイ後CloudWatch Logsのログ出力と保持設定を必ず確認
+
+6. セキュリティポリシー
+S3のパブリックアクセス禁止厳守
+
+WAFは最新管理ルールセット適用＋Botコントロール有効化
+
+IAMは最小権限原則徹底
+
+CloudTrailで操作監査可能に
+
+API Gatewayは認証（IAMまたはJWT）検討推奨
+
+7. 運用監視
+CloudWatchアラーム（Lambdaエラー、APIエラー検知）
+
+WAF遮断ログの定期監査
+
+DynamoDBの容量、API応答時間のモニタリング
+
+SES送信失敗監視設定
+
+8. 納品物
+CDK TypeScriptソースコード（Layer含む）
+
+CloudFormationテンプレート（CDK生成版）
+
+構築手順書
+
+テスト仕様書（疎通・セキュリティ含む）
+
+運用マニュアル
