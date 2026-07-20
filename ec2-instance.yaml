@@ -1,0 +1,90 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CFN template for EC2 with existing VPC, Subnet, Security Group'
+
+Parameters:
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Existing Subnet ID
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Existing Security Group ID
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Description: AMI ID
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Existing EC2 KeyPair name
+  Ec2RoleName:
+    Type: String
+    Description: Existing IAM Role name for EC2
+  EIPAllocationId:
+    Type: String
+    Default: ''
+    Description: Existing EIP Allocation ID (optional)
+
+Conditions:
+  HasEIP: !Not [!Equals [!Ref EIPAllocationId, '']]
+
+Resources:
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref Ec2RoleName
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref SecurityGroupId
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      MetadataOptions:
+        HttpTokens: required
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            DeleteOnTermination: true
+            Encrypted: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -y
+          dnf install -y python3
+          dnf install -y jq
+          dnf install -y postgresql15
+          dnf install -y docker
+          systemctl start docker
+          systemctl enable docker
+          usermod -aG docker ec2-user
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ec2'
+
+  EIPAddress:
+    Type: AWS::EC2::EIPAssociation
+    Condition: HasEIP
+    Properties:
+      AllocationId: !Ref EIPAllocationId
+      InstanceId: !Ref EC2Instance
+
+Outputs:
+  InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref EC2Instance
+  PrivateIP:
+    Description: Private IP address
+    Value: !GetAtt EC2Instance.PrivateIp
