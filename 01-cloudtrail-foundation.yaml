@@ -1,0 +1,181 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudTrail基盤-東京リージョン(ap-northeast-1)
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: login-audit
+    Description: プロジェクト名
+  Environment:
+    Type: String
+    Default: audit
+    AllowedValues: [audit,prod,staging,dev]
+    Description: 環境名
+  BucketName:
+    Type: String
+    Default: ''
+    Description: S3バケット名(空欄で自動生成)
+  TransitionIA:
+    Type: Number
+    Default: 90
+    MinValue: 30
+    MaxValue: 730
+    Description: STANDARD_IA移行日数
+  TransitionGlacier:
+    Type: Number
+    Default: 365
+    MinValue: 90
+    MaxValue: 1825
+    Description: Glacier移行日数
+  RetentionDays:
+    Type: Number
+    Default: 2555
+    MinValue: 365
+    MaxValue: 3650
+    Description: ログ保持日数
+
+Conditions:
+  AutoBucketName: !Equals [!Ref BucketName,'']
+
+Resources:
+  CloudTrailLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !If [AutoBucketName,!Sub ${ProjectName}-ctlogs-${AWS::AccountId},!Ref BucketName]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ArchiveRule
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: !Ref TransitionIA
+                StorageClass: STANDARD_IA
+              - TransitionInDays: !Ref TransitionGlacier
+                StorageClass: GLACIER
+            ExpirationInDays: !Ref RetentionDays
+          - Id: AbortMultipart
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  CloudTrailLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudTrailLogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt CloudTrailLogsBucket.Arn
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+          - Sid: CloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${CloudTrailLogsBucket.Arn}/AWSLogs/${AWS::AccountId}/*
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                aws:SourceAccount: !Ref AWS::AccountId
+          - Sid: DenyNonSSL
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt CloudTrailLogsBucket.Arn
+              - !Sub ${CloudTrailLogsBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          - Sid: DenyUnencryptedUpload
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub ${CloudTrailLogsBucket.Arn}/*
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: AES256
+
+  CloudTrailServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-cloudtrail-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSCloudTrailFullAccess
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  AuditCloudTrail:
+    Type: AWS::CloudTrail::Trail
+    Properties:
+      TrailName: !Sub ${ProjectName}-${Environment}-management-events
+      S3BucketName: !Ref CloudTrailLogsBucket
+      IsLogging: true
+      IsMultiRegionTrail: true
+      EnableLogFileValidation: true
+      EventSelectors:
+        - ReadWriteType: All
+          IncludeManagementEvents: true
+          DataResources: []
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  CloudTrailLogsBucket:
+    Description: CloudTrailログS3バケット名
+    Value: !Ref CloudTrailLogsBucket
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-cloudtrail-bucket
+  CloudTrailLogsBucketArn:
+    Description: CloudTrailログS3バケットARN
+    Value: !GetAtt CloudTrailLogsBucket.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-cloudtrail-bucket-arn
+  CloudTrailName:
+    Description: CloudTrail名
+    Value: !Ref AuditCloudTrail
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-cloudtrail-name
+  CloudTrailRoleArn:
+    Description: CloudTrail IAMロールARN
+    Value: !GetAtt CloudTrailServiceRole.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-cloudtrail-role-arn
